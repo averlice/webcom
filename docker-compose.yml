@@ -1,0 +1,30 @@
+# WebCom deployment.
+# WebCom listens on port 2032 inside the container.
+#
+# SECURITY: By default it binds to 0.0.0.0 (all interfaces) so it's reachable
+# from your network. If you only want it on the host machine, change the left
+# side to 127.0.0.1:
+#     ports:
+#       - "127.0.0.1:2032:2032"
+#
+# The /data volume is the ONLY place secrets + generated config live. It is
+# mounted from ./data on the host, which is gitignored.
+services:
+  webcom:
+    build: .
+    image: averlice/webcom:latest
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:2032:2032"
+    volumes:
+      - ./data:/data
+    # Drop Linux capabilities; the container is the jail.
+    cap_drop:
+      - ALL
+    read_only: false   # /data must be writable; everything else is static in the image
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - WEBCOM_DATA_DIR=/data
+      - WEBCOM_PORT=2032
+      - WEBCOM_BIND=0.0.0.0

@@ -1,0 +1,12 @@
+# WebCom dependencies (trimmed from PowerCom's full pyproject for headless Linux).
+# Web/security layer:
+Flask>=3.0
+argon2-cffi>=23.1
+# TTCom command + notification engine (subset of PowerCom deps that work headless):
+ntfpy>=0.0.12
+pyprowl>=3.0.1
+notify-py>=0.3.43
+prismatoid>=0.16.3
+watchdog>=6.0.0
+# NOTE: wxpython, sound_lib, pywin32 are intentionally EXCLUDED - they are
+# desktop/audio deps for the PowerCom GUI, not needed by WebCom's headless bridge.

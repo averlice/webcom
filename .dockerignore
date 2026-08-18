@@ -1,0 +1,17 @@
+# Never ship secrets or build artifacts into the image.
+/data
+*.conf
+config.local.json
+config.local.py
+__pycache__
+*.pyc
+.git
+.gitignore
+.venv
+venv
+*.log
+powercom.log
+ttcom.ini
+ttcom_defaults.ini
+powercom.ini
+webcom/__pycache__
