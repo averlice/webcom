@@ -81,6 +81,38 @@ class TTComBridge:
         if str(APP_DIR) not in sys.path:
             sys.path.insert(0, str(APP_DIR))
         try:
+            # WebCom is headless: it does NOT do local audio. PowerCom's
+            # audio.manager / audio.sound import the Windows-only `sound_lib`
+            # (Bass) at module load, which cannot install on Linux slim. Inject
+            # a minimal fake `sound_lib` package (main, output, stream submodules)
+            # so the import chain succeeds. WebCom never actually plays audio.
+            import types as _types
+            if "sound_lib" not in sys.modules:
+                _sound_lib = _types.ModuleType("sound_lib")
+                _sl_main = _types.ModuleType("sound_lib.main")
+                _sl_output = _types.ModuleType("sound_lib.output")
+                _sl_stream = _types.ModuleType("sound_lib.stream")
+
+                class _BassError(Exception):
+                    pass
+
+                class _Output:
+                    pass
+
+                class _FileStream:
+                    def __init__(self, *a, **k):
+                        pass
+
+                _sl_main.BassError = _BassError
+                _sl_output.Output = _Output
+                _sl_stream.FileStream = _FileStream
+                _sound_lib.main = _sl_main
+                _sound_lib.output = _sl_output
+                _sound_lib.stream = _sl_stream
+                sys.modules["sound_lib"] = _sound_lib
+                sys.modules["sound_lib.main"] = _sl_main
+                sys.modules["sound_lib.output"] = _sl_output
+                sys.modules["sound_lib.stream"] = _sl_stream
             # WebCom is headless: it does NOT do local text-to-speech. It
             # publishes "speak" events to the browser instead. PowerCom's
             # speech.py imports the native `prism` CFFI binding (needs a

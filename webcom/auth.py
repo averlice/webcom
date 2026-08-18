@@ -70,6 +70,10 @@ def logout_user() -> None:
 @auth_bp.route("/login", methods=["GET", "POST"])
 def login():
     from flask import render_template_string
+    # Fresh install: no admin user exists yet, so the login page is a dead end.
+    # Send the user to the setup wizard instead.
+    if not config_store.is_configured():
+        return redirect(url_for("setup"))
     if request.method == "POST":
         user = request.form.get("username", "")
         pw = request.form.get("password", "")

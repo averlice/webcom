@@ -42,6 +42,10 @@ def _auth_guard():
 
 @app.route("/")
 def index():
+    # Fresh install (no web admin configured yet) -> straight to the setup
+    # wizard, never to a login page with no user. This is the "get started" page.
+    if not config_store.is_configured():
+        return redirect(url_for("setup"))
     guard = _auth_guard()
     if guard:
         return guard
@@ -65,8 +69,13 @@ def setup():
             config_store.add_server(s)
         # Generate PowerCom's ttcom.conf from our store.
         config_store.generate_ttcom_conf()
-        # Auto-connect after setup.
-        bridge.connect_all()
+        # Auto-connect after setup. If a server is unreachable, don't fail the
+        # whole setup - surface it and let the dashboard retry.
+        try:
+            bridge.connect_all()
+        except Exception as e:
+            import logging
+            logging.getLogger("webcom").warning("connect_all failed during setup: %s", e)
         return redirect(url_for("auth.login"))
     from .pages import setup_html
     return render_template_string(setup_html())
@@ -89,7 +98,7 @@ def servers():
             config_store.generate_ttcom_conf()
         return {"ok": True}
     from .pages import servers_html
-    return render_template_string(servers_html(), servers=config_store.list_servers())
+    return render_template_string(servers_html(config_store.list_servers()))
 
 
 @app.route("/notifications", methods=["GET", "POST"])
@@ -110,7 +119,7 @@ def notifications():
             config_store.generate_ttcom_conf()
         return {"ok": True}
     from .pages import notifications_html
-    return render_template_string(notifications_html(), servers=config_store.list_servers())
+    return render_template_string(notifications_html(config_store.list_servers()))
 
 
 @app.route("/pmsg", methods=["GET", "POST"])
@@ -127,7 +136,7 @@ def pmsg():
         out = bridge.run_command(sn, f"pmsg {target} {text}")
         return {"ok": True, "output": out}
     from .pages import pmsg_html
-    return render_template_string(pmsg_html(), servers=config_store.list_servers())
+    return render_template_string(pmsg_html(config_store.list_servers()))
 
 
 @app.route("/admin", methods=["GET", "POST"])
@@ -142,7 +151,7 @@ def admin():
         out = bridge.run_command(sn, cmd)
         return {"ok": True, "output": out}
     from .pages import admin_html
-    return render_template_string(admin_html(), servers=config_store.list_servers())
+    return render_template_string(admin_html(config_store.list_servers()))
 
 
 @app.route("/api/command", methods=["POST"])
