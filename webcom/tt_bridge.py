@@ -105,6 +105,11 @@ class TTComBridge:
             # (gitignored) so the import succeeds. This keeps secrets in the
             # volume while satisfying PowerCom's load-time requirement.
             data_conf = config_store.TTCOM_CONF_PATH
+            if not data_conf.is_file():
+                # Fresh container: no servers configured yet. Generate a
+                # defaults-only ttcom.conf so PowerCom's import-time conf read
+                # succeeds; the wizard will regenerate it with real servers.
+                config_store.generate_ttcom_conf()
             if data_conf.is_file():
                 import shutil
                 shutil.copyfile(str(data_conf), str(APP_DIR / "ttcom.conf"))

@@ -189,7 +189,10 @@ def main():
     _apply_session_secret()
     port = config_store.DEFAULT_PORT
     bind = config_store.DEFAULT_BIND
-    bridge.start()
+    # NOTE: do NOT build the TTCom bridge here. PowerCom's conf.py reads
+    # ttcom.conf at import time, and on a fresh container /data is empty (no
+    # servers yet). The bridge is built lazily on first use, and /setup
+    # regenerates ttcom.conf (with real servers) before calling connect_all().
     app.run(host=bind, port=port, threaded=True, use_reloader=False)
 
 
