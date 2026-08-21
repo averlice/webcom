@@ -340,6 +340,7 @@ class Triggers:
         """Watch the queue for things to do.
         Runs in its own thread as started by queue().
         """
+        import traceback
         while True:
             if not self._q:
                 sleep(0.5)
@@ -347,4 +348,5 @@ class Triggers:
             parmline = self._q.pop(0)
             try: self.apply(parmline)
             except Exception as e:
-                print("Error during trigger action: " +str(e))
+                print("Error during trigger action: " + str(e))
+                traceback.print_exc()

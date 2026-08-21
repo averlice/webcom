@@ -82,4 +82,6 @@ def upgrade_conf():
         print("Warning: Original configuration update failed; some material may remain but will be ignored")
         time.sleep(3.0)
 
-upgrade_conf()
+
+if __name__ == "__main__":
+    upgrade_conf()

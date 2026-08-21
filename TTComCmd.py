@@ -822,11 +822,14 @@ PowerCom version %ver%
             return
         # A command to run against a specific server (newServer).
         oldname = self._curShortname
-        # Reparse to avoid spacing issues.
-        tmp,line = line.split(None, 1)
+        # Reparse to avoid spacing issues - use shlex to respect quotes.
+        try:
+            tmp, cmd_line = line.split(None, 1)
+        except ValueError:
+            cmd_line = ""
         try:
             self._curShortname = newServer.shortname
-            self.onecmd(line)
+            self.onecmd(cmd_line)
         finally:
             self._curShortname = oldname
 

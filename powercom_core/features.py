@@ -193,7 +193,7 @@ def do_powercom(cmd, line: str = "") -> None:
         if rest.lower() in ("list", "ls"):
             _powercomListBackends(cmd)
         elif rest:
-            _setPowercomConfig(cmd, serverName, "speechEngine", rest)
+            _setPowercomConfig(cmd, serverName, "speechengine", rest)
         else:
             cmd.msg(f"speechEngine for {serverName} is {_currentSpeechBackend(serverName)}.")
     elif subcommand in ("voices", "voice-list"):
@@ -239,10 +239,10 @@ def getUserInfo(server, userid):
 
 def prittifyName(userid, userinfo):
     name = ''
-    if 'nickname' in userinfo: name = f'"{userinfo['nickname']}"'
+    if 'nickname' in userinfo: name = f'"{userinfo["nickname"]}"'
     if 'userName' in userinfo:
-        if name and name != userinfo['userName']: name += f' ({userinfo['userName']})'
-        else: name = f'"{userinfo['userName']}"'
+        if name and name != userinfo['userName']: name += f' ({userinfo["userName"]})'
+        else: name = f'"{userinfo["userName"]}"'
     if not name: name = f'User {userid}'
     return name
 
@@ -315,7 +315,8 @@ def prittifyEvent(server, event):
             channelname = server.channelname(event.parms.chanid)
             output += f'channel {channelname} created'
         case 'removechannel':
-            channelName = serverCaches[server.shortname]['channels'][event.parms.chanid] if event.parms.chanid in serverCaches[server.shortname]['channels'] else f'with id {event.parms.chanid}'
+            channels_cache = serverCaches.get(server.shortname, {}).get('channels', {})
+            channelName = channels_cache.get(event.parms.chanid, f'with id {event.parms.chanid}')
             output += f'channel {channelName} deleted'
         case 'updatechannel':
             channelname = server.channelname(event.parms.chanid)
@@ -552,13 +553,11 @@ class PowerComEventHandler:
     def initializeCache(self):
         if self.server.shortname  not in serverCaches: serverCaches[self.server.shortname] = {'users': {}, 'channels': {}}
         print('ok')
-        for u in self.server.users:
-            u = self.server.users[u]
+        for uid, u in self.server.users.items():
             userInfo = {'username': u['username'], 'usertype': u['usertype']}
-            userInfo['nickname'] = prittifyName(u['userid'], userInfo)
-            serverCaches[u['userid']] = userInfo
-        for c in self.server.channels:
-            c = self.server.channels[c]
+            userInfo['nickname'] = prittifyName(uid, userInfo)
+            serverCaches[self.server.shortname]['users'][uid] = userInfo
+        for cid, c in self.server.channels.items():
             serverCaches[self.server.shortname]['channels'][c['chanid']] = self.server.channelname(c['chanid'])
 
 def apply(server, parmline, runCommand) -> None:

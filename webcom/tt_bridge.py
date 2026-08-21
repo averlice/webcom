@@ -52,12 +52,43 @@ class EventQueue:
                 pass
 
 
+class LogBuffer:
+    """Captures log events for the web dashboard."""
+    
+    def __init__(self, max_size: int = 1000):
+        self._logs: list[dict] = []
+        self._max_size = max_size
+        self._lock = threading.Lock()
+    
+    def add(self, level: str, message: str, source: str = "webcom") -> None:
+        import time
+        entry = {
+            "timestamp": time.time(),
+            "level": level,
+            "message": message,
+            "source": source
+        }
+        with self._lock:
+            self._logs.append(entry)
+            if len(self._logs) > self._max_size:
+                self._logs.pop(0)
+    
+    def get_recent(self, count: int = 100) -> list[dict]:
+        with self._lock:
+            return self._logs[-count:]
+    
+    def clear(self) -> None:
+        with self._lock:
+            self._logs.clear()
+
+
 class TTComBridge:
     def __init__(self) -> None:
         self._cmd = None
         self._thread = None
         self._lock = threading.Lock()
         self.events = EventQueue()
+        self.logs = LogBuffer()
         self._ready = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -67,6 +98,64 @@ class TTComBridge:
                 return
             self._cmd = self._build_cmd()
             self._ready = True
+            # Set up log capture for web dashboard
+            self._setup_log_capture()
+            # Log startup message to verify capture works
+            import logging
+            logging.getLogger("webcom").info("WebCom bridge started, log capture active")
+            # Auto-connect to servers in background after startup
+            self._start_auto_connect()
+            return
+
+    def _setup_log_capture(self) -> None:
+        """Attach a logging handler to capture logs for the web dashboard."""
+        import logging
+        
+        class BridgeLogHandler(logging.Handler):
+            def __init__(self, log_buffer):
+                super().__init__()
+                self.log_buffer = log_buffer
+            
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    self.log_buffer.add(record.levelname, msg, record.name)
+                except Exception:
+                    pass
+        
+        handler = BridgeLogHandler(self.logs)
+        handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+        
+        # Attach to webcom logger and root logger
+        logging.getLogger("webcom").addHandler(handler)
+        logging.getLogger("webcom").setLevel(logging.DEBUG)
+        # Also capture root logger events
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
+
+    def _start_auto_connect(self) -> None:
+        """Start background thread to connect to servers and join channels."""
+        import threading
+        th = threading.Thread(target=self._auto_connect_task, daemon=True)
+        th.start()
+
+    def _auto_connect_task(self) -> None:
+        """Background task: wait for PowerCom auto-login, then join channels."""
+        import time
+        import logging
+        log = logging.getLogger("webcom")
+        # Give PowerCom time to auto-login (it happens during readServers in __init__)
+        time.sleep(2.0)
+        log.info("Auto-connect task starting")
+        self.logs.add("INFO", "Auto-connect task starting", "webcom")
+        try:
+            self.connect_all()
+            log.info("Auto-connect task completed")
+            self.logs.add("INFO", "Auto-connect task completed", "webcom")
+        except Exception as e:
+            import traceback
+            log.exception("Auto-connect task failed")
+            self.logs.add("ERROR", f"Auto-connect task failed: {e}\n{traceback.format_exc()}", "webcom")
 
     def _build_cmd(self):
         """Import TTComCmd from the PowerCom dir and wrap its output hooks.
@@ -168,7 +257,7 @@ class TTComBridge:
                     # Headless: don't actually TTS; publish for the UI.
                     bridge.events.publish({"type": "speak", "text": str(message)})
 
-            instance = _WebComTTComCmd(noAutoLogins=True)
+            instance = _WebComTTComCmd(noAutoLogins=False)
             instance.allowPython()
             return instance
         finally:
@@ -204,21 +293,81 @@ class TTComBridge:
         return out
 
     def connect_all(self) -> None:
-        """Connect + login to every configured server (autoLogin)."""
+        """Ensure all configured servers are logged in and joined to their channels.
+        If PowerCom's auto-login already connected, just join the channel.
+        """
+        import time
+        import logging
+        log = logging.getLogger("webcom")
+        # Also log directly to buffer to ensure capture
+        self.logs.add("INFO", "connect_all: starting", "webcom")
         if not self._ready:
             self.start()
-        servers = []
         from . import config_store
         servers = config_store.list_servers()
+        log.info("connect_all: found %d servers", len(servers))
+        self.logs.add("INFO", f"connect_all: found {len(servers)} servers", "webcom")
+        if not servers:
+            self.logs.add("WARNING", "connect_all: no servers configured", "webcom")
+            return
         for s in servers:
             sn = s.get("shortname", "server")
+            channel = s.get("channel")
+            log.info("connect_all: processing server %s (channel=%s)", sn, channel)
+            self.logs.add("INFO", f"connect_all: processing server {sn} (channel={channel})", "webcom")
             try:
                 self._cmd.onecmd(f"switch {sn}")
-                self._cmd.onecmd("connect")
-                self._cmd.onecmd("login")
-                self.events.publish({"type": "system", "text": f"Connecting to {sn}..."})
+                # Check current state
+                cur_server = getattr(self._cmd, "curServer", None)
+                st = getattr(cur_server, "state", "") if cur_server else ""
+                log.info("connect_all: server %s current state=%s", sn, st)
+                self.logs.add("INFO", f"connect_all: server {sn} current state={st}", "webcom")
+                
+                if st != "loggedIn":
+                    self.events.publish({"type": "system", "text": f"Connecting to {sn}..."})
+                    self._cmd.onecmd("connect")
+                    # login() returns but actual login is async - wait for loggedIn state
+                    self._cmd.onecmd("login")
+                    # Wait for login to complete (state -> loggedIn)
+                    deadline = time.time() + 15.0
+                    last_state = ""
+                    while time.time() < deadline:
+                        cur_server = getattr(self._cmd, "curServer", None)
+                        st = getattr(cur_server, "state", "") if cur_server else ""
+                        if st != last_state:
+                            log.info("connect_all: server %s state changed: %s -> %s", sn, last_state, st)
+                            self.logs.add("INFO", f"connect_all: server {sn} state changed: {last_state} -> {st}", "webcom")
+                            last_state = st
+                        if st == "loggedIn":
+                            break
+                        if st == "loginError":
+                            break
+                        time.sleep(0.5)
+                    cur_server = getattr(self._cmd, "curServer", None)
+                    st = getattr(cur_server, "state", "") if cur_server else ""
+                    log.info("connect_all: server %s state after login wait=%s", sn, st)
+                    self.logs.add("INFO", f"connect_all: server {sn} state after login wait={st}", "webcom")
+                    # Debug: dump server info
+                    if cur_server:
+                        try:
+                            log.info("connect_all: server %s info: %s", sn, dict(cur_server.info))
+                        except Exception:
+                            pass
+                    if st != "loggedIn":
+                        self.events.publish({"type": "system", "text": f"Login to {sn} failed, state={st}"})
+                        continue
+                    self.events.publish({"type": "system", "text": f"Logged in to {sn}"})
+                else:
+                    self.events.publish({"type": "system", "text": f"Already logged in to {sn}"})
+                
+                if channel:
+                    self._cmd.onecmd(f"join {channel}")
+                    self.events.publish({"type": "system", "text": f"Joined {channel} on {sn}"})
             except Exception as e:
-                self.events.publish({"type": "system", "text": f"Failed {sn}: {e}"})
+                import traceback
+                log.exception("connect_all: failed for %s", sn)
+                self.logs.add("ERROR", f"connect_all: failed for {sn}: {e}\n{traceback.format_exc()}", "webcom")
+                self.events.publish({"type": "system", "text": f"Failed {sn}: {e}\n{traceback.format_exc()}"})
 
 
 # Singleton bridge used by the web app.

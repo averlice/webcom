@@ -197,10 +197,20 @@ def generate_ttcom_conf() -> Path:
             lines.append(f"statusmsg={s.get('status')}")
         lines.append(f"encrypted={'1' if s.get('encrypted') else '0'}")
         lines.append(f"autoLogin={s.get('autoLogin', 1)}")
+        # Channel to auto-join after login (e.g. /text/). Stored as a passthrough
+        # key; WebCom issues `join <channel>` post-login (PowerCom has no native
+        # auto-join-on-login from config).
+        if s.get("channel"):
+            lines.append(f"channel={s.get('channel')}")
         # Notification toggles (optional, per-server)
         for k in _NOTIFY_KEYS:
             if k in s:
                 lines.append(f"{k}={s[k]}")
         lines.append("")
     TTCOM_CONF_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Restrict permissions since this contains plaintext passwords
+    try:
+        TTCOM_CONF_PATH.chmod(0o600)
+    except Exception:
+        pass
     return TTCOM_CONF_PATH

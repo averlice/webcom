@@ -17,6 +17,7 @@ BASE = """<!doctype html>
   <a href="/">Dashboard</a> |
   <a href="/servers">Servers</a> |
   <a href="/notifications">Notifications</a> |
+  <a href="/logs">Logs</a> |
   <a href="/pmsg">TTCom PM</a> |
   <a href="/admin">Admin</a> |
   <a href="/logout">Logout</a>
@@ -60,6 +61,7 @@ function addServer(){
   '<label>Password <input name="password" type="password"></label><br>'+
   '<label>Nickname <input name="nickname" value="WebCom"></label><br>'+
   '<label>Status message <input name="status"></label><br>'+
+  '<label>Channel to join (e.g. /text/) <input name="channel" value="/text/"></label><br>'+
   '<label>Encrypted <input type="checkbox" name="encrypted" value="1"></label><br>'+
   '</fieldset>';
   document.getElementById('servers').appendChild(d);
@@ -82,6 +84,7 @@ function collect(){
       password:s.querySelector('[name=password]').value,
       nickname:s.querySelector('[name=nickname]').value,
       status:s.querySelector('[name=status]').value,
+      channel:s.querySelector('[name=channel]').value,
       encrypted:s.querySelector('[name=encrypted]').checked,
       autoLogin:1
     });
@@ -114,31 +117,59 @@ es.onmessage=function(e){
 def servers_html(servers):
     rows = "".join(
         f"<li>{s.get('shortname')} - {s.get('host')}:{s.get('tcpport')} "
-        f"(user {s.get('username')})</li>" for s in servers)
+        f"(user {s.get('username')}) "
+        f'<button type="button" onclick="editServer(\'{s.get("shortname")}\')">Edit</button></li>' for s in servers)
     return _wrap("Servers", f"""
 <ul>{rows or '<li>No servers configured.</li>'}</ul>
 <h2>Add / edit a server</h2>
-<form method="post" action="/servers">
-<p><label>Short name <input name="shortname" required></label></p>
-<p><label>Host <input name="host" required></label></p>
-<p><label>TCP port <input name="tcpport" value="10333"></label></p>
-<p><label>UDP port <input name="udpport" value="10333"></label></p>
-<p><label>Username <input name="username"></label></p>
-<p><label>Password <input name="password" type="password"></label></p>
-<p><label>Nickname <input name="nickname" value="WebCom"></label></p>
-<p><label>Status <input name="status"></label></p>
-<p><label>Encrypted <input type="checkbox" name="encrypted" value="1"></label></p>
-<button>Save server</button>
+<form id="serverForm" method="post" action="/servers">
+<input type="hidden" name="shortname" id="f_shortname">
+<p><label>Short name <input name="shortname" id="f_shortname_display" required></label></p>
+<p><label>Host <input name="host" id="f_host" required></label></p>
+<p><label>TCP port <input name="tcpport" id="f_tcpport" value="10333"></label></p>
+<p><label>UDP port <input name="udpport" id="f_udpport" value="10333"></label></p>
+<p><label>Username <input name="username" id="f_username"></label></p>
+<p><label>Password <input name="password" id="f_password" type="password" autocomplete="new-password"></label></p>
+<p><label>Nickname <input name="nickname" id="f_nickname" value="WebCom"></label></p>
+<p><label>Status <input name="status" id="f_status"></label></p>
+<p><label>Channel to join (e.g. /text/) <input name="channel" id="f_channel" value="/text/"></label></p>
+<p><label>Encrypted <input name="encrypted" id="f_encrypted" type="checkbox" value="1"></label></p>
+<button type="submit">Save server</button>
 </form>
+<script>
+async function editServer(sn) {{
+  const r = await fetch('/servers/edit/' + sn);
+  const d = await r.json();
+  if (!d.ok) return alert(d.error);
+  const s = d.server;
+  document.getElementById('f_shortname').value = s.shortname;
+  document.getElementById('f_shortname_display').value = s.shortname;
+  document.getElementById('f_host').value = s.host;
+  document.getElementById('f_tcpport').value = s.tcpport;
+  document.getElementById('f_udpport').value = s.udpport;
+  document.getElementById('f_username').value = s.username || '';
+  document.getElementById('f_password').value = s.password || '';
+  document.getElementById('f_nickname').value = s.nickname || 'WebCom';
+  document.getElementById('f_status').value = s.status || '';
+  document.getElementById('f_channel').value = s.channel || '/text/';
+  document.getElementById('f_encrypted').checked = s.encrypted || false;
+}}
+</script>
 """)
 
 
 def notifications_html(servers):
     items = "".join(
-        f"<li>{s.get('shortname')}: loginout={s.get('notifyloginout', True)}, "
-        f"message={s.get('notifymessage', True)}, system={s.get('systemnotify', False)}, "
-        f"ntfy={s.get('ntfy', False)}, prowl={s.get('prowl', False)}, "
-        f"mgnotify={s.get('mgnotify', False)}, pushover={s.get('pushover', False)}</li>"
+        f"<li>{s.get('shortname')}: "
+        f"loginout={'✓' if s.get('notifyloginout', True) else '✗'} "
+        f"message={'✓' if s.get('notifymessage', True) else '✗'} "
+        f"system={'✓' if s.get('systemnotify', False) else '✗'} "
+        f"ntfy={'✓' if s.get('ntfy', False) else '✗'} "
+        f"ntfyUrl={s.get('ntfyUrl', '')} "
+        f"ntfyTopic={s.get('ntfyTopic', '')} "
+        f"prowl={'✓' if s.get('prowl', False) else '✗'} "
+        f"mgnotify={'✓' if s.get('mgnotify', False) else '✗'} "
+        f"pushover={'✓' if s.get('pushover', False) else '✗'}</li>"
         for s in servers)
     return _wrap("Notifications", f"""
 <ul>{items or '<li>No servers.</li>'}</ul>
@@ -149,11 +180,36 @@ def notifications_html(servers):
 <p><label>Notify messages <input type="checkbox" name="notifymessage" value="1"></label></p>
 <p><label>System notification <input type="checkbox" name="systemnotify" value="1"></label></p>
 <p><label>ntfy <input type="checkbox" name="ntfy" value="1"></label></p>
+<p><label>ntfy URL <input name="ntfyUrl" placeholder="https://ntfy.sh"></label></p>
+<p><label>ntfy Topic <input name="ntfyTopic" placeholder="my-topic"></label></p>
+<p><label>ntfy User <input name="ntfyUser"></label></p>
+<p><label>ntfy Password <input name="ntfyPassword" type="password"></label></p>
 <p><label>Prowl <input type="checkbox" name="prowl" value="1"></label></p>
 <p><label>MG Notify <input type="checkbox" name="mgnotify" value="1"></label></p>
 <p><label>Pushover <input type="checkbox" name="pushover" value="1"></label></p>
 <button>Save</button>
 </form>
+""")
+
+
+def logs_html():
+    return _wrap("Logs", """
+<div id="logs" style="white-space:pre-wrap;font-family:monospace;max-height:70vh;overflow:auto;background:#1e1e1e;color:#d4d4d4;padding:1rem;border-radius:4px">
+Loading logs...
+</div>
+<script>
+async function loadLogs() {
+  try {
+    const r = await fetch('/api/logs');
+    const d = await r.json();
+    document.getElementById('logs').textContent = d.logs || 'No logs available';
+  } catch (e) {
+    document.getElementById('logs').textContent = 'Failed to load logs: ' + e;
+  }
+}
+loadLogs();
+setInterval(loadLogs, 5000);
+</script>
 """)
 
 

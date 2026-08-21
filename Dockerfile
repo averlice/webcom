@@ -8,7 +8,7 @@
 #   - The web dashboard login is argon2-hashed (separate from TT creds).
 #   - The only writable path is /data (the volume). The app filesystem is read-only
 #     at runtime except for that mount.
-FROM python:3.14-slim
+FROM python:3.13-slim
 
 # Run as non-root from the start.
 RUN groupadd -r webcom && useradd -r -g webcom -m -d /home/webcom webcom
@@ -16,7 +16,7 @@ RUN groupadd -r webcom && useradd -r -g webcom -m -d /home/webcom webcom
 # Trimmed dependency set: drop wxpython / sound_lib / pywin32 (desktop/audio deps
 # irrelevant to a headless Linux container). Keep what TTComCmd + notifiers need.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc \
+    && apt-get install -y --no-install-recommends gcc sox libsox-fmt-all \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -60,12 +60,31 @@ def setup():
         return redirect(url_for("auth.login"))
     if request.method == "POST":
         # Step 1: web admin
-        user = request.form.get("web_user", "admin")
+        user = request.form.get("web_user", "admin").strip()
         pw = request.form.get("web_pass", "")
+        if not user:
+            return "Username required", 400
+        if not pw:
+            return "Password required", 400
         config_store.setup_web_admin(user, pw)
         # Step 2: TT servers (repeatable; at least one expected)
-        servers = json.loads(request.form.get("servers_json", "[]"))
+        try:
+            servers = json.loads(request.form.get("servers_json", "[]"))
+        except json.JSONDecodeError:
+            return "Invalid servers JSON", 400
+        if not isinstance(servers, list) or not servers:
+            return "At least one server required", 400
         for s in servers:
+            if not isinstance(s, dict):
+                continue
+            # Validate required fields
+            if not s.get("shortname") or not s.get("host"):
+                return "Server shortname and host required", 400
+            try:
+                s["tcpport"] = int(s.get("tcpport", 10333))
+                s["udpport"] = int(s.get("udpport", 10333))
+            except (ValueError, TypeError):
+                return "Invalid port number", 400
             config_store.add_server(s)
         # Generate PowerCom's ttcom.conf from our store.
         config_store.generate_ttcom_conf()
@@ -79,6 +98,17 @@ def setup():
         return redirect(url_for("auth.login"))
     from .pages import setup_html
     return render_template_string(setup_html())
+
+
+@app.route("/servers/edit/<shortname>")
+def edit_server(shortname):
+    guard = _auth_guard()
+    if guard:
+        return guard
+    s = config_store.get_server(shortname)
+    if not s:
+        return {"ok": False, "error": "Server not found"}, 404
+    return {"ok": True, "server": s}
 
 
 @app.route("/servers", methods=["GET", "POST", "DELETE"])
@@ -152,6 +182,49 @@ def admin():
         return {"ok": True, "output": out}
     from .pages import admin_html
     return render_template_string(admin_html(config_store.list_servers()))
+
+
+@app.route("/logs")
+def logs():
+    guard = _auth_guard()
+    if guard:
+        return guard
+    from .tt_bridge import bridge
+    bridge.start()  # Ensure bridge is started and log capture active
+    from .pages import logs_html
+    return render_template_string(logs_html())
+
+
+@app.route("/api/logs")
+def api_logs():
+    guard = _auth_guard()
+    if guard:
+        return guard, 403
+    from .tt_bridge import bridge
+    bridge.start()  # Ensure bridge is started and log capture active
+    logs = bridge.logs.get_recent(200)
+    # Format for display
+    formatted = []
+    for entry in logs:
+        import datetime
+        ts = datetime.datetime.fromtimestamp(entry["timestamp"]).strftime("%H:%M:%S")
+        formatted.append(f"{ts} [{entry['level']}] {entry['source']}: {entry['message']}")
+    return {"logs": "\n".join(formatted) or "No logs captured yet"}
+
+
+@app.route("/api/debug/bridge")
+def api_debug_bridge():
+    """Debug endpoint to check bridge status."""
+    guard = _auth_guard()
+    if guard:
+        return guard, 403
+    from .tt_bridge import bridge
+    return {
+        "ready": bridge._ready,
+        "cmd_exists": bridge._cmd is not None,
+        "servers_configured": len(bridge.logs.get_recent(0)) > 0,  # dummy check
+        "log_count": len(bridge.logs.get_recent(1000)),
+    }
 
 
 @app.route("/api/command", methods=["POST"])
