@@ -1,271 +1,182 @@
-# PowerCom
+# WebCom
 
-PowerCom is a   distribution of Doug Lee's [TeamTalk Commander](https://dlee.org/ttcom/beta) based on the [DWCom](https://github.com/dragonwolfsp/dwcom) plugin. It includes event speech through Prism, sound playback through `sound_lib`, push/system notifications, and rotating event logs as built-in features.
+WebCom is a headless TeamTalk text client delivered as a web dashboard. Based on PowerCom (a fork of TeamTalk Commander).
 
-The original DWCom plugin required unnecessary dependencies, used dead libraries, hasn't been updated in the best part of a year and causes issues when run as a compiled executable.
+## Features
 
-***
+- **Web Dashboard** - Access TeamTalk from any browser
+- **Multi-server support** - Connect to multiple TeamTalk servers
+- **Real-time events** - Live event stream via Server-Sent Events (SSE)
+- **Admin commands** - Kick, ban, broadcast, move users, etc.
+- **TTCom Private Messages** - Invisible to desktop clients
+- **Notifications** - ntfy, Prowl, Pushover, MG Notify, system notifications
+- **Logs page** - Real-time application logs in the browser
+- **Server management** - Add/edit/remove servers via UI
 
-## Requirements
+## Quick Start
 
-- Python 3.12 or newer
-- `uv` for dependency management
-- Optional: UPX to squeeze the binary down to a smaller size when running `compile.cmd`
+### Prerequisites
 
-***
+- Docker & Docker Compose
+- TeamTalk server(s) with credentials
 
-## Setup
+### Deployment
 
-1. Press Windows + R, type powershell and press Enter.
-2. Clone the repository.
+```bash
+# Clone the repository
+git clone https://github.com/averlice/webcom.git
+cd webcom
 
-```powershell
-git clone https://github.com/seedy60/PowerCom
-cd PowerCom
+# Start the container
+docker compose up -d
+
+# View logs
+docker compose logs -f webcom
 ```
 
-3. Install `uv` if needed.
+The dashboard will be available at:
+- **Local**: http://localhost:2032
+- **Network**: http://YOUR_SERVER_IP:2032
 
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
+### First Run Setup
 
-4. Install Python and dependencies.
-
-```powershell
-uv python install
-uv sync
-```
-
-5. If you already have a `ttcom.conf`, place it in the PowerCom folder. For a new setup, copy `ttcom.conf.sample` to `ttcom.conf` and edit the server entries.
-
-6. Run PowerCom.
-
-```powershell
-uv run python powercom.py
-```
-
-7. To build a configuration file in the wxPython UI, run:
-
-```powershell
-uv run python powercom.py --config
-```
-
-***
-
-## Compiling
-
-Run from the repository root:
-
-```cmd
-compile.cmd
-```
-
-The script runs `uv sync`, builds `powercom.exe` with PyInstaller, collects Prism and `sound_lib` native binaries, then copies these runtime assets into `dist\powercom`:
-
-- `sounds`
-- `ttcom.conf.sample`
-- `powercom_defaults.ini`
-
-***
-## Compiled release
-
-If you just want a precompiled binary that works right away, simply [download the latest release](https://github.com/seedy60/PowerCom/releases/latest/download/powercom.zip), extract the zip file, copy your ttcom.conf or ttcom.conf.sample to the extracted folder and run the powercom executable.
-
-***
+1. Open the dashboard URL
+2. You'll be redirected to the setup wizard (`/setup`)
+3. Create a web dashboard admin user (argon2-hashed password)
+4. Add TeamTalk server(s):
+   - **Short name**: Unique identifier (e.g., `tunmi13`)
+   - **Host**: TeamTalk server hostname (e.g., `tunmi13.com`)
+   - **TCP/UDP Port**: Usually `10333` or `9483`
+   - **Username/Password**: TeamTalk credentials (plaintext - TeamTalk protocol requirement)
+   - **Nickname**: Display name in TeamTalk
+   - **Channel**: Auto-join channel (e.g., `/text/`)
+   - **Encrypted**: Enable if server uses TLS
+4. Save and login
 
 ## Configuration
 
-PowerCom reads its server and feature options from `ttcom.conf`.
+All persistent data lives in the `./data` volume (gitignored):
 
-You can place any PowerCom option under a specific `[server <name>]` section to apply it only to that server, or under `[server defaults]` to apply it to all servers unless a server overrides it.
-
-PowerCom watches `ttcom.conf` and reloads its own feature options when the file changes. Connection-level changes may still require the `refresh` command.
-
-You can build or edit `ttcom.conf` with the wxPython configuration UI:
-
-```powershell
-uv run python powercom.py --config
+```
+data/
+├── config.local.json    # WebCom config (web admin hash + TT servers)
+└── ttcom.conf           # Generated PowerCom config (auto-generated)
 ```
 
-Boolean options accept:
+### Environment Variables
 
-- **Truthy:** `true`, `1`, `y`, `yes`
-- **Falsy:** `false`, `0`, `n`, `no`
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBCOM_DATA_DIR` | `/data` | Data volume path |
+| `WEBCOM_PORT` | `2032` | HTTP port |
+| `WEBCOM_BIND` | `0.0.0.0` | Bind address |
 
-Keys are not case-sensitive. For example, `speechdModule` is the same as `speechdmodule`.
+### Security Notes
 
-### Configuring Speech
+- **TeamTalk passwords** are stored in plaintext in `config.local.json` - this is a TeamTalk protocol requirement, not our choice
+- **Web dashboard passwords** are argon2-hashed (stored in `config.local.json` as `admin_hash`)
+- The `./data` directory should be backed up and never committed to git
+- Session cookies are signed with a random secret stored in config
 
-By default:
+## Dashboard Pages
 
-- Speech is enabled for all servers.
-- The speech backend (`speechEngine`) is `auto`.
-- Speech interruption is enabled.
+| Page | Description |
+|------|-------------|
+| `/` | Live event stream (joins, messages, kicks) |
+| `/servers` | Manage TeamTalk servers (add/edit/delete) |
+| `/notifications` | Configure per-server notifications |
+| `/pmsg` | Send TTCom private messages (invisible to desktop clients) |
+| `/admin` | Run admin commands (kick, ban, broadcast, move, etc.) |
+| `/logs` | Real-time application logs |
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `speech` | bool | Enables or disables speech. Default: `true`. |
-| `speechEngine` | string | Prism backend to use. `auto` chooses the best available backend. Use `powercom backends` to list available backends on the current system. |
-| `speechInterrupt` | bool | If `true`, new speech interrupts current speech. Default: `true`. |
-| `speechdModule` | string | Output module for Speech Dispatcher. Ignored if Speech Dispatcher is not used. |
-| `speechVoice` | string or number | Voice for the selected backend. Use a voice index, an exact voice name, or `-1` for the backend default. |
-| `speechRate` | number | Speech rate for the selected backend. |
-| `speechVolume` | number | Output volume for the selected backend. Values above `1` are treated as percentages. |
-| `speechPitch` | number | Pitch for the selected backend. |
-| `noSpeak` | string | Prevents certain events from being spoken. |
+## Admin Commands
 
-Common `speechEngine` aliases include `sapi`, `onecore`, `nvda`, `jaws`, `speechd`, `voiceover`, `nsspeech`, `orca`, `uia`, `windoweyes`, `systemaccess`, `zdsr`, and `zoomtext`. Availability depends on the operating system and installed assistive technologies.
+Available via `/admin` page or API:
 
-### Changing Prism Backend and Voice
-
-Use the `powercom` command inside PowerCom for the current server:
-
-```text
-powercom
-powercom backends
-powercom backend
-powercom backend auto
-powercom backend SAPI
-powercom voices
-powercom voices SAPI
-powercom voice
-powercom voice 0
-powercom voice "Microsoft David Desktop - English (United States)"
-powercom voice auto
-powercom test
-powercom test Hello from PowerCom
+```
+kick <user>                    # Kick from server
+ckick <user> / kick -c <user>  # Kick from channel
+kb <user>                      # Kick + ban
+ban list                       # List bans
+ban add user=<name>            # Add ban
+broadcast <message>            # Server-wide message (requires Broadcast right)
+move <user> <channel>          # Move user to channel
+op <user>                      # Op a user
+geolocate <user|ip>            # IP geolocation
+whois <user>                   # User info
+account list/add/delete        # Account management
+channel list                   # List channels
+file get/delete                # File management
 ```
 
-`powercom backend` shows or updates `speechEngine` in `ttcom.conf`.
-`powercom voice` shows or updates `speechVoice` in `ttcom.conf`.
-`powercom voice auto` stores the automatic/default voice setting.
+## API Endpoints
 
-Use `powercom backends` and `powercom voices <backend>` to see the Prism backend IDs and voice indexes available on the current system.
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/events` | GET | SSE stream of live events |
+| `/api/command` | POST | Run TTCom command (`{shortname, command}`) |
+| `/api/logs` | GET | Recent application logs |
+| `/api/debug/bridge` | GET | Bridge connection status |
 
-### `noSpeak` Usage
+## Development
 
-`noSpeak` accepts a list of event names joined with `+`.
+### Building Locally
 
-```ini
-noSpeak = updateuser+updatechannel+serverupdate
+```bash
+docker compose build --no-cache
+docker compose up -d
 ```
 
-Common event names:
+### Project Structure
 
-- `updateuser` - User status changes
-- `adduser` - User joins a channel
-- `removeuser` - User leaves a channel
-- `loggedin` - User logs in
-- `loggedout` - User logs out
-- `messagedeliver` - A message is received
-- `serverupdate` - The server is updated
+```
+webcom/
+├── app.py              # Flask application
+├── tt_bridge.py        # PowerCom/TTCom bridge
+├── config_store.py     # Configuration management
+├── auth.py             # Argon2 authentication
+├── pages/
+│   └── __init__.py     # HTML templates
+powercom_core/
+├── features.py         # PowerCom event handling
+TTComCmd.py             # TTCom command processor
+ttapi.py                # TeamTalk protocol client
+conf.py                 # Configuration parser
+mplib/                  # Shared libraries
+```
 
-### Randomized Login/Logout Messages
+## Troubleshooting
 
-PowerCom supports custom randomized speech messages for login and logout events.
+### Login hangs at "loggingIn"
 
-Create the following text files in the `text` directory:
+Check `/logs` page for state transitions. Common causes:
+- Wrong credentials
+- Wrong host/port
+- `encrypted` setting mismatch (true/false)
+- Server rejects client version
 
-- `logins.txt`
-- `logouts.txt`
+### No audio notifications
 
-Each file should contain one possible spoken message per line. If the files are missing or empty, PowerCom falls back to `"logged in"` and `"logged out"`.
+Audio requires `sox` (installed in Dockerfile). WebCom publishes "speak" events to browser instead.
 
-***
+### Container won't start
 
-## Configuring Sounds
+```bash
+docker compose logs webcom
+```
 
-By default:
+Check for:
+- Port 2032 already in use
+- `./data` directory permissions
+- Missing config files
 
-- Sounds are enabled.
-- The sound pack is `default`.
-- Playback type is `overlapping`.
-- Volume is `100`.
+## License
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `sounds` | bool | Enables or disables sounds. Default: `true`. |
-| `soundPack` | string | Name of the sound pack. Default: `default`. |
-| `soundVolume` | number (0-100) | Playback volume. Default: `100`. |
-| `playbackType` | string | How sounds are played. Options: `overlapping`, `interrupting`, `oneByOne`. Default: `overlapping`. |
-| `noSound` | string | Prevents certain events from playing sounds. Usage is the same as `noSpeak`. |
+GPL-3.0 - Based on TeamTalk Commander by Doug Lee.
 
-Sound files are loaded from `sounds\<soundPack>`. Matching is case-insensitive and based on the sound file stem, so `join.wav` and `join.ogg` both match the `join` event sound.
+## Credits
 
-***
-
-## Configuring Notifications
-
-By default, notification providers are disabled. When a provider is enabled, login/logout events and messages trigger notifications unless filtered.
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `notifyLogInOut` | bool | Notify when users log in or out. Default: `true`. |
-| `notifyMessage` | bool | Notify when a message is received. Default: `true`. |
-
-### Ntfy Notifications
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `ntfy` | bool | Enable or disable Ntfy notifications. Default: `false`. |
-| `ntfyTopic` | string | Ntfy topic to publish to. |
-| `ntfyUrl` | string | URL of the Ntfy instance. Default: `https://ntfy.sh`. |
-| `ntfyUser` | string | Optional Ntfy username. |
-| `ntfyPassword` | string | Optional Ntfy password. |
-
-### Prowl Notifications
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `prowl` | bool | Enable or disable Prowl notifications. Default: `false`. |
-| `prowlKey` | string | Prowl API key. |
-
-### MG Notify
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `mgNotify` | bool | Enable or disable MG Notify notifications. Default: `false`. |
-| `mgNotifyKey` | string | MG Notify API key. |
-
-### Pushover Notifications
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `pushover` | bool | Enable or disable Pushover notifications. Default: `false`. |
-| `pushoverUser` | string | Pushover user key. |
-| `pushoverToken` | string | Pushover application API token. |
-| `pushoverDevice` | string | Optional Pushover device name. |
-| `pushoverSound` | string | Optional Pushover sound name. |
-| `pushoverPriority` | number | Optional Pushover priority: `-2`, `-1`, `0`, `1`, or `2`. |
-| `pushoverRetry` | number | Required when `pushoverPriority=2`; retry interval in seconds, minimum `30`. |
-| `pushoverExpire` | number | Required when `pushoverPriority=2`; retry window in seconds, maximum `10800`. |
-
-### System Notifications
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `systemNotify` | bool | Enable or disable system notifications. Default: `false`. |
-
-***
-
-## Configuring Logging
-
-By default:
-
-- Logging is enabled.
-- Max log size is `4 MB` per file.
-- Max log files is `5`.
-- Total log storage is about `20 MB` before rotating.
-
-| Option | Type | Description |
-|--------|------|-------------|
-| `log` | bool | Enable or disable logging. Default: `true`. |
-| `maxLogSize` | number | Max size in MB before log rotation. Default: `4`. |
-| `maxLogFiles` | number | Max number of log files before overwriting oldest. Default: `5`. |
-
-***
-
-## Known Issues
-
-- **Windows COM errors:** Some Windows speech backends can raise COM errors. Use `powercom backends` to list available Prism backends and `powercom backend <backend>` to switch to another backend when one is unstable.
+- **TeamTalk** by BearWare.dk
+- **TeamTalk Commander (TTCom)** by Doug Lee
+- **PowerCom** - Enhanced TTCom fork
+- **WebCom** - Headless web wrapper
