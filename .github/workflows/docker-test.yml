@@ -1,0 +1,80 @@
+name: Docker Test
+
+on:
+  push:
+    branches: [main, webcom-scaffold]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker compose build --no-cache
+
+      - name: Start container
+        run: docker compose up -d
+
+      - name: Wait for service
+        run: |
+          for i in {1..30}; do
+            if curl -sf http://localhost:2032/api/debug/bridge | grep -q '"ready": true'; then
+              echo "Service ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Service failed to start"
+          docker compose logs webcom
+          exit 1
+
+      - name: Test health endpoints
+        run: |
+          # Test debug endpoint
+          curl -sf http://localhost:2032/api/debug/bridge | jq .
+          # Test logs endpoint
+          curl -sf http://localhost:2032/api/logs | jq .
+          # Test setup page (should redirect to login)
+          curl -sf http://localhost:2032/setup | grep -q "WebCom"
+
+      - name: Test Python syntax
+        run: |
+          docker compose exec -T webcom python -m py_compile \
+            powercom.py powercom_app.py \
+            webcom/app.py webcom/tt_bridge.py webcom/config_store.py \
+            webcom/auth.py webcom/pages/__init__.py \
+            powercom_core/features.py TTComCmd.py triggers.py \
+            upgrade_conf.py conf.py \
+            mplib/conf.py mplib/mycmd.py mplib/player.py \
+            geolocator.py banreq.py parmline.py
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run shellcheck on scripts
+        run: |
+          if command -v shellcheck >/dev/null; then
+            shellcheck *.sh 2>/dev/null || true
+          fi
+
+      - name: Check Python syntax
+        run: |
+          python3 -m py_compile \
+            powercom.py powercom_app.py \
+            webcom/app.py webcom/tt_bridge.py webcom/config_store.py \
+            webcom/auth.py webcom/pages/__init__.py \
+            powercom_core/features.py TTComCmd.py triggers.py \
+            upgrade_conf.py conf.py \
+            mplib/conf.py mplib/mycmd.py mplib/player.py \
+            geolocator.py banreq.py parmline.py
