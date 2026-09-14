@@ -1,4 +1,4 @@
-﻿"""
+"""
 config class for PowerCom
 """
 
@@ -26,15 +26,13 @@ class Config:
         return self._convertConfigValue(configValue)
 
     def getRaw(self, serverName: str, itemName: str):
-        try:
-            serverConfig = self.serverConfigs[serverName]
-        except ValueError as e:
-            print(e)
-            return None
-        try:
+        serverConfig = self.serverConfigs.get(serverName)
+        if serverConfig and itemName in serverConfig:
             return serverConfig[itemName]
-        except KeyError:
-            return None
+        defaults = self.serverConfigs.get("defaults")
+        if defaults and itemName in defaults:
+            return defaults[itemName]
+        return None
 
     def set(self, serverName: str, itemName: str, value: str) -> None:
         self._writeServerValue(serverName, itemName, value)

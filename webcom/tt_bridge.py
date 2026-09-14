@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import config_store
+from . import notification_store
 
 # The PowerCom app directory (where ttcom.conf + TTComCmd live).
 _APP_DIR_ENV = os.environ.get("WEBCOM_APP_DIR", "")
@@ -41,6 +42,11 @@ class EventQueue:
         with self._lock:
             self._subs.append(q)
         return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._lock:
+            if q in self._subs:
+                self._subs.remove(q)
 
     def publish(self, event: dict) -> None:
         with self._lock:
@@ -87,6 +93,9 @@ class TTComBridge:
         self._cmd = None
         self._thread = None
         self._lock = threading.Lock()
+        # TTComCmd has one mutable active-server pointer, so commands and a
+        # config reload must never run concurrently.
+        self._command_lock = threading.RLock()
         self.events = EventQueue()
         self.logs = LogBuffer()
         self._ready = False
@@ -183,14 +192,25 @@ class TTComBridge:
                 _sl_stream = _types.ModuleType("sound_lib.stream")
 
                 class _BassError(Exception):
-                    pass
+                    code = 0
 
                 class _Output:
-                    pass
+                    def __init__(self, *a, **k):
+                        self.volume = 100
+                    def play(self, *a, **k): pass
+                    def stop(self, *a, **k): pass
 
                 class _FileStream:
                     def __init__(self, *a, **k):
-                        pass
+                        self.frequency = 44100
+                        self.volume = 1.0
+                        self.is_playing = False
+                        self.is_paused = False
+                        self.is_stopped = True
+                    def play(self, *a, **k): pass
+                    def stop(self, *a, **k): pass
+                    def pause(self, *a, **k): pass
+                    def free(self, *a, **k): pass
 
                 _sl_main.BassError = _BassError
                 _sl_output.Output = _Output
@@ -206,14 +226,39 @@ class TTComBridge:
             # publishes "speak" events to the browser instead. PowerCom's
             # speech.py imports the native `prism` CFFI binding (needs a
             # compiler + cffi at build time), which we don't want in the
-            # container. Inject a minimal fake `prism` module so the import
-            # chain succeeds without building native speech backends.
+            # container. Inject a fake `prism` module that forwards speech
+            # events to the browser event stream.
             import types as _types
             if "prism" not in sys.modules:
                 _prism = _types.ModuleType("prism")
                 _prism.BackendId = _types.SimpleNamespace(AV_SPEECH="AV_SPEECH",
                                                           NVDA="NVDA", JAWS="JAWS")
-                _prism.Context = object
+                class _MockOutput:
+                    class features:
+                        supports_speak = True
+                        supports_braille = True
+                        supports_output = True
+                        supports_stop = True
+                        supports_refresh_voices = False
+                        supports_count_voices = False
+                    def speak(self, text, interrupt=True):
+                        self.output(text, interrupt=interrupt)
+                    def output(self, text, interrupt=True):
+                        if text:
+                            self_bridge = bridge
+                            self_bridge.events.publish({"type": "speak", "text": str(text)})
+                    def braille(self, text):
+                        pass
+                    def stop(self):
+                        pass
+
+                class _MockContext:
+                    def create_best(self):
+                        return _MockOutput()
+                    def create_backend(self, *a, **k):
+                        return _MockOutput()
+
+                _prism.Context = _MockContext
                 sys.modules["prism"] = _prism
             # PowerCom's mplib/conf.py resolves "itself" via sys.argv[0] at
             # import time. With `python -m` or `-c`, argv[0] isn't a usable
@@ -243,21 +288,129 @@ class TTComBridge:
             conf.conf.name = "WebCom"
             conf.conf.version = "2519"
 
+            # Capture real server notifications: every event that PowerCom
+            # processes (logins, logouts, PMs, channel/broadcast msgs, kicks,
+            # status changes, joins/leaves, file events) is persisted to SQLite
+            # and mirrored to the browser as a typed "notification" event so
+            # the Notifications feed + PM inbox can show history and live up-
+            # dates. We hook the event handler constructor because it central-
+            # izes the server/event/runCommand triple in one place.
+            import powercom_core.features as pcom_features
+
+            # Event classification helpers. These turn a raw PowerCom event
+            # into a stable storage kind + human label. TeamTalk user IDs are
+            # ephemeral (they change every login), so labels are captured here
+            # at event time and the userid is only kept for reference.
+            def _notif_userid(event):
+                parms = event.parms
+                for key in ("userid", "srcuserid", "destuserid", "kickerid"):
+                    if key in parms:
+                        uid = str(parms[key])
+                        if uid != "0":
+                            return uid
+                return None
+
+            def _notif_kind(event):
+                ev = getattr(event, "event", "") or ""
+                if ev == "messagedeliver":
+                    mtype = str(event.parms.type).strip() if "type" in event.parms else ""
+                    return {"1": "pm", "2": "channel", "3": "broadcast", "4": "custom"}.get(mtype, "custom")
+                return {
+                    "loggedin": "login",
+                    "loggedout": "logout",
+                    "kicked": "kick",
+                    "updateuser": "status",
+                    "adduser": "joined",
+                    "removeuser": "left",
+                    "addfile": "file",
+                    "removefile": "file",
+                    "fileaccepted": "file",
+                    "filecompleted": "file",
+                    "serverupdate": "system",
+                }.get(ev)
+
+            def _notif_peer(server, event):
+                uid = _notif_userid(event)
+                if not uid:
+                    return ""
+                info = pcom_features.getUserInfo(server, uid)
+                nickname = (info.get("nickname") or "").strip()
+                username = (info.get("userName") or "").strip()
+                if nickname and username:
+                    return f"{nickname} ({username})"
+                return nickname or username or f"user {uid}"
+
+            def _notif_extra(event):
+                extra = {}
+                for key in ("userid", "srcuserid", "destuserid", "kickerid",
+                            "chanid", "type", "msgtype"):
+                    if key in event.parms:
+                        extra[key] = str(event.parms[key])
+                return extra
+
+            _orig_event_init = pcom_features.PowerComEventHandler.__init__
+
+            def _feature_event_init(self, server, event, runCommand):
+                _orig_event_init(self, server, event, runCommand)
+                # The original returns early (no prittyEvent) for command-caused,
+                # self-caused, and not-logged-in events; we skip those too.
+                text = getattr(self, "prittyEvent", None)
+                if not text:
+                    return
+                kind = _notif_kind(event)
+                if kind is None:
+                    return
+                peer = _notif_peer(server, event)
+                row = notification_store.insert(
+                    server=getattr(server, "shortname", ""),
+                    kind=kind,
+                    text=str(text),
+                    direction="in",
+                    peer=peer,
+                    extra=_notif_extra(event),
+                )
+                bridge.events.publish({
+                    "type": "notification",
+                    "id": row["id"] if row else None,
+                    "kind": kind,
+                    "server": getattr(server, "shortname", ""),
+                    "direction": "in",
+                    "peer": peer,
+                    "text": str(text),
+                })
+
+            pcom_features.PowerComEventHandler.__init__ = _feature_event_init
+
             # Wrap output methods to publish to our event queue.
             bridge = self
 
             class _WebComTTComCmd(CmdClass):
-                def msg(self, text):
-                    bridge.events.publish({"type": "output", "text": str(text)})
+                def msg(self, *args, **kwargs):
+                    text = " ".join(str(a) for a in args if a is not None)
+                    if not text:
+                        return
+                    ev_type = "event" if kwargs.get("fromEvent") else "output"
+                    bridge.events.publish({"type": ev_type, "text": text})
 
-                def outputFromEvent(self, text):
-                    bridge.events.publish({"type": "event", "text": str(text)})
+                def msgFromEvent(self, *args):
+                    text = " ".join(str(a) for a in args if a is not None)
+                    if text:
+                        bridge.events.publish({"type": "event", "text": text})
+
+                def outputFromEvent(self, *args, **kwargs):
+                    text = " ".join(str(a) for a in args if a is not None)
+                    if text:
+                        bridge.events.publish({"type": "event", "text": text})
 
                 def speak(self, message, *a, **k):
-                    # Headless: don't actually TTS; publish for the UI.
-                    bridge.events.publish({"type": "speak", "text": str(message)})
+                    # Headless: publish for the UI.
+                    if message:
+                        bridge.events.publish({"type": "speak", "text": str(message)})
 
-            instance = _WebComTTComCmd(noAutoLogins=False)
+            # WebCom owns the connection lifecycle below. Letting TTComCmd
+            # auto-login during construction races the bridge's reconnect and
+            # means newly saved servers are not reliably picked up.
+            instance = _WebComTTComCmd(noAutoLogins=True)
             instance.allowPython()
             return instance
         finally:
@@ -272,25 +425,50 @@ class TTComBridge:
         # Capture via a temporary subscription.
         sub = self.events.subscribe()
         try:
-            # Switch active server first, then run the command.
-            self._cmd.onecmd(f"switch {shortname}")
-            self._cmd.onecmd(command)
-        except Exception as e:
-            out.append(f"[error] {e}")
-        # Drain whatever the command published (best-effort, short window).
-        import time
-        deadline = time.time() + 2.0
-        while time.time() < deadline:
-            try:
-                ev = sub.get_nowait()
-                if ev.get("type") in ("output", "event", "speak"):
-                    out.append(ev.get("text", ""))
-            except queue.Empty:
-                if not self._cmd:
-                    break
-                # small yield
-                time.sleep(0.05)
+            with self._command_lock:
+                try:
+                    # Switch active server first, then run the command.
+                    if shortname:
+                        self._cmd.onecmd(f"switch {shortname}")
+                    self._cmd.onecmd(command)
+                except Exception as e:
+                    out.append(f"[error] {e}")
+            # Drain output captured during execution
+            import time
+            deadline = time.time() + 0.35
+            while time.time() < deadline:
+                try:
+                    ev = sub.get(timeout=0.05)
+                    if ev.get("type") in ("output", "event", "speak"):
+                        out.append(ev.get("text", ""))
+                except queue.Empty:
+                    if out:
+                        # Output received and queue drained
+                        break
+        finally:
+            self.events.unsubscribe(sub)
         return out
+
+    def refresh_and_connect(self) -> None:
+        """Reload saved servers and connect in the background.
+
+        The dashboard can add or edit a server after TTComCmd was built. Its
+        in-memory server list otherwise remains stale until the container is
+        restarted, which is why saved servers appeared not to connect.
+        """
+        if not self._ready:
+            self.start()
+        threading.Thread(target=self._refresh_and_connect_task,
+                         name="webcom-server-refresh", daemon=True).start()
+
+    def _refresh_and_connect_task(self) -> None:
+        try:
+            with self._command_lock:
+                self._cmd.onecmd("refresh")
+                self.connect_all()
+        except Exception as exc:
+            self.logs.add("ERROR", f"Server refresh failed: {exc}", "webcom")
+            self.events.publish({"type": "system", "text": f"Server refresh failed: {exc}"})
 
     def connect_all(self) -> None:
         """Ensure all configured servers are logged in and joined to their channels.
@@ -304,70 +482,213 @@ class TTComBridge:
         if not self._ready:
             self.start()
         from . import config_store
-        servers = config_store.list_servers()
+        # Every saved server participates by default. A user can opt a server
+        # out of startup connection with connectOnStart=false.
+        servers = [server for server in config_store.list_servers()
+                   if server.get("connectOnStart", True)]
         log.info("connect_all: found %d servers", len(servers))
         self.logs.add("INFO", f"connect_all: found {len(servers)} servers", "webcom")
         if not servers:
             self.logs.add("WARNING", "connect_all: no servers configured", "webcom")
             return
-        for s in servers:
+        with self._command_lock:
+          for s in servers:
             sn = s.get("shortname", "server")
             channel = s.get("channel")
             log.info("connect_all: processing server %s (channel=%s)", sn, channel)
             self.logs.add("INFO", f"connect_all: processing server {sn} (channel={channel})", "webcom")
             try:
                 self._cmd.onecmd(f"switch {sn}")
-                # Check current state
-                cur_server = getattr(self._cmd, "curServer", None)
+                # Check current state safely
+                cur_server = self.get_server_obj(sn)
                 st = getattr(cur_server, "state", "") if cur_server else ""
                 log.info("connect_all: server %s current state=%s", sn, st)
                 self.logs.add("INFO", f"connect_all: server {sn} current state={st}", "webcom")
                 
                 if st != "loggedIn":
                     self.events.publish({"type": "system", "text": f"Connecting to {sn}..."})
-                    self._cmd.onecmd("connect")
-                    # login() returns but actual login is async - wait for loggedIn state
                     self._cmd.onecmd("login")
-                    # Wait for login to complete (state -> loggedIn)
-                    deadline = time.time() + 15.0
-                    last_state = ""
-                    while time.time() < deadline:
-                        cur_server = getattr(self._cmd, "curServer", None)
-                        st = getattr(cur_server, "state", "") if cur_server else ""
-                        if st != last_state:
-                            log.info("connect_all: server %s state changed: %s -> %s", sn, last_state, st)
-                            self.logs.add("INFO", f"connect_all: server {sn} state changed: {last_state} -> {st}", "webcom")
-                            last_state = st
-                        if st == "loggedIn":
-                            break
-                        if st == "loginError":
-                            break
-                        time.sleep(0.5)
-                    cur_server = getattr(self._cmd, "curServer", None)
+                    cur_server = self.get_server_obj(sn)
                     st = getattr(cur_server, "state", "") if cur_server else ""
                     log.info("connect_all: server %s state after login wait=%s", sn, st)
                     self.logs.add("INFO", f"connect_all: server {sn} state after login wait={st}", "webcom")
-                    # Debug: dump server info
-                    if cur_server:
-                        try:
-                            log.info("connect_all: server %s info: %s", sn, dict(cur_server.info))
-                        except Exception:
-                            pass
                     if st != "loggedIn":
-                        self.events.publish({"type": "system", "text": f"Login to {sn} failed, state={st}"})
+                        error = getattr(cur_server, "lastError", None) or "No login response"
+                        self.logs.add("WARNING", f"Login to {sn} failed: {error}", "webcom")
+                        self.events.publish({"type": "system", "text": f"Login to {sn} failed: {error}"})
                         continue
                     self.events.publish({"type": "system", "text": f"Logged in to {sn}"})
                 else:
                     self.events.publish({"type": "system", "text": f"Already logged in to {sn}"})
                 
                 if channel:
-                    self._cmd.onecmd(f"join {channel}")
-                    self.events.publish({"type": "system", "text": f"Joined {channel} on {sn}"})
+                    self.events.publish({"type": "system", "text": f"Joining {channel} on {sn}"})
             except Exception as e:
                 import traceback
                 log.exception("connect_all: failed for %s", sn)
                 self.logs.add("ERROR", f"connect_all: failed for {sn}: {e}\n{traceback.format_exc()}", "webcom")
-                self.events.publish({"type": "system", "text": f"Failed {sn}: {e}\n{traceback.format_exc()}"})
+                self.events.publish({"type": "system", "text": f"Failed {sn}: {e}"})
+
+    def get_server_obj(self, shortname: str):
+        if not self._cmd or not hasattr(self._cmd, "servers"):
+            return None
+        return self._cmd.servers.get(shortname)
+
+    def get_servers_status(self) -> list[dict]:
+        """Returns connection and channel status for all configured servers."""
+        from . import config_store
+        result = []
+        cfg_servers = config_store.list_servers()
+        for s in cfg_servers:
+            sn = s.get("shortname", "")
+            server_obj = self.get_server_obj(sn)
+            state = getattr(server_obj, "state", "disconnected") if server_obj else "offline"
+            chan_name = ""
+            if server_obj and getattr(server_obj, "me", None):
+                cid = getattr(server_obj.me, "chanid", None)
+                if cid is not None and hasattr(server_obj, "channelname"):
+                    try:
+                        chan_name = server_obj.channelname(cid)
+                    except Exception:
+                        pass
+            users_count = len(getattr(server_obj, "users", {})) if server_obj else 0
+            result.append({
+                "shortname": sn,
+                "host": s.get("host", ""),
+                "port": s.get("tcpport", 10333),
+                "nickname": s.get("nickname", "WebCom"),
+                "state": state,
+                "channel": chan_name or s.get("channel", "/"),
+                "users_count": users_count,
+                "connectOnStart": s.get("connectOnStart", True),
+            })
+        return result
+
+    def connect_server(self, shortname: str) -> None:
+        """Connect and log in to a specific server in background."""
+        if not self._ready:
+            self.start()
+        def _task():
+            with self._command_lock:
+                try:
+                    self.events.publish({"type": "system", "text": f"Connecting to {shortname}..."})
+                    self._cmd.onecmd(f"switch {shortname}")
+                    self._cmd.onecmd("login")
+                    server_obj = self.get_server_obj(shortname)
+                    st = getattr(server_obj, "state", "") if server_obj else ""
+                    if st == "loggedIn":
+                        self.events.publish({"type": "system", "text": f"Connected to {shortname}"})
+                    else:
+                        err = getattr(server_obj, "lastError", None) or "Login failed"
+                        self.events.publish({"type": "system", "text": f"Failed {shortname}: {err}"})
+                except Exception as exc:
+                    self.events.publish({"type": "system", "text": f"Connection error {shortname}: {exc}"})
+        threading.Thread(target=_task, name=f"webcom-connect-{shortname}", daemon=True).start()
+
+    def disconnect_server(self, shortname: str) -> None:
+        """Disconnect from a specific server."""
+        if not self._ready:
+            self.start()
+        def _task():
+            with self._command_lock:
+                try:
+                    self._cmd.onecmd(f"switch {shortname}")
+                    self._cmd.onecmd("disconnect")
+                    self.events.publish({"type": "system", "text": f"Disconnected from {shortname}"})
+                except Exception as exc:
+                    self.events.publish({"type": "system", "text": f"Disconnect error {shortname}: {exc}"})
+        threading.Thread(target=_task, name=f"webcom-disconnect-{shortname}", daemon=True).start()
+
+    def send_chat(self, shortname: str, message: str) -> list[str]:
+        """Send a channel message on the specified server."""
+        return self.run_command(shortname, f"cmsg {message}")
+
+    def send_pm(self, shortname: str, target: str, message: str, is_ttcom: bool = False) -> list[str]:
+        """Send a private message (umsg for standard TT, pmsg for TTCom invisible PM).
+
+        target may be a nickname/username fragment or an exact "#userid".
+        Use an exact #userid (obtained from find_users) when the name is
+        ambiguous, because PowerCom's interactive user picker cannot run
+        headlessly. Successful sends are recorded as direction=out PMs in
+        the notification store, labelled with the recipient's nickname+(user).
+        """
+        cmd = "pmsg" if is_ttcom else "umsg"
+        out = self.run_command(shortname, f"{cmd} {target} {message}")
+        # Record the send only if it did not error. run_command prepends an
+        # [error] line when PowerCom raised.
+        failed = any(ln.startswith("[error]") for ln in out)
+        if not failed:
+            peer = self._pm_peer_label(shortname, target)
+            notification_store.insert(
+                server=shortname,
+                kind="pm",
+                text=message or "",
+                direction="out",
+                peer=peer,
+                extra={"is_ttcom": is_ttcom},
+            )
+        return out
+
+    def _pm_peer_label(self, shortname: str, target: str) -> str:
+        """Best-effort human label (nickname (username)) for a PM recipient."""
+        matches = self.find_users(shortname, target)
+        if not matches:
+            return target or ""
+        if target.startswith("#") and target[1:].isdigit():
+            for m in matches:
+                if m.get("userid") == target[1:]:
+                    return self._label_from_match(m)
+        if len(matches) == 1:
+            return self._label_from_match(matches[0])
+        return target or ""
+
+    @staticmethod
+    def _label_from_match(match: dict) -> str:
+        nickname = (match.get("nickname") or "").strip().strip('"')
+        username = (match.get("username") or "").strip()
+        if nickname and username:
+            return f"{nickname} ({username})"
+        return nickname or username or (f"user {match.get('userid')}" if match.get("userid") else "")
+
+    def find_users(self, shortname: str, target: str) -> list[dict]:
+        """Return all users on a server whose nickname/username matches target.
+
+        Mirrors PowerCom's userMatch containment rules but returns the full
+        match list instead of prompting interactively, so the web UI can render
+        ambiguous names as a dropdown. Each entry has userid, nickname and
+        username so a PM can then be sent to an exact "#userid".
+        """
+        if not self._ready or self._cmd is None:
+            self.start()
+        target = (target or "").strip()
+        if not target:
+            return []
+        with self._command_lock:
+            try:
+                if shortname:
+                    self._cmd.onecmd(f"switch {shortname}")
+                server = self._cmd.curServer
+            except Exception as exc:
+                self.logs.add("WARNING", f"find_users: cannot switch to {shortname}: {exc}", "webcom")
+                return []
+            users = list(server.users.values())
+            if target.startswith("#") and target[1:].isdigit():
+                matches = [u for u in users if str(u.userid) == target[1:]]
+            else:
+                needle = target.lower()
+                matches = [u for u in users
+                           if needle in server.nonEmptyNickname(u, "dnc").lower()]
+            results = []
+            for u in matches:
+                nickname = server.nonEmptyNickname(u, "dnc")
+                username = u.get("username") or ""
+                results.append({
+                    "userid": str(u.userid),
+                    "nickname": nickname,
+                    "username": username,
+                    "label": self._label_from_match({"nickname": nickname, "username": username, "userid": str(u.userid)}),
+                })
+            return results
 
 
 # Singleton bridge used by the web app.

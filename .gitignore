@@ -189,6 +189,10 @@ ttcom.conf
 config.local.py
 *.log
 powercom.log
+# Tor hidden-service data (contains private keys) - NEVER commit:
+/tor-data/
+# Local-dev dependency lockfile; the image installs via requirements-webcom.txt + pip:
+uv.lock
 # Python caches:
 __pycache__/
 *.pyc

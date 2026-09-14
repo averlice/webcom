@@ -29,6 +29,9 @@ DATA_DIR = Path(os.environ.get("WEBCOM_DATA_DIR", "/data"))
 CONFIG_PATH = DATA_DIR / "config.local.json"
 TTCOM_CONF_PATH = DATA_DIR / "ttcom.conf"
 
+_APP_DIR_ENV = os.environ.get("WEBCOM_APP_DIR", "")
+APP_DIR = Path(_APP_DIR_ENV) if _APP_DIR_ENV else Path(__file__).resolve().parent.parent
+
 DEFAULT_PORT = int(os.environ.get("WEBCOM_PORT", "2032"))
 DEFAULT_BIND = os.environ.get("WEBCOM_BIND", "0.0.0.0")
 
@@ -114,7 +117,11 @@ def add_server(server: dict) -> None:
     """
     data = load()
     servers = data.setdefault("servers", [])
-    shortname = server.get("shortname")
+    shortname = str(server.get("shortname", "")).strip()
+    if not shortname or any(char.isspace() for char in shortname):
+        raise ValueError("Server short name is required and cannot contain spaces")
+    server = dict(server)
+    server["shortname"] = shortname
     for i, s in enumerate(servers):
         if s.get("shortname") == shortname:
             servers[i] = server
@@ -184,7 +191,11 @@ def generate_ttcom_conf() -> Path:
         "",
     ]
     for s in data.get("servers", []):
-        sn = s.get("shortname", "server")
+        sn = str(s.get("shortname", "")).strip()
+        # Do not emit a malformed [server ] section if an older WebCom version
+        # saved one. The UI will surface it for correction instead.
+        if not sn or any(char.isspace() for char in sn):
+            continue
         lines.append(f"[server {sn}]")
         lines.append(f"host={s.get('host', '')}")
         lines.append(f"tcpport={s.get('tcpport', 10333)}")
@@ -197,11 +208,14 @@ def generate_ttcom_conf() -> Path:
             lines.append(f"statusmsg={s.get('status')}")
         lines.append(f"encrypted={'1' if s.get('encrypted') else '0'}")
         lines.append(f"autoLogin={s.get('autoLogin', 1)}")
-        # Channel to auto-join after login (e.g. /text/). Stored as a passthrough
-        # key; WebCom issues `join <channel>` post-login (PowerCom has no native
-        # auto-join-on-login from config).
+        # TTCom uses an exact channel-path comparison after login.  Normalize
+        # the dashboard-friendly /text form to its canonical /text/ form so
+        # it can match the channel list received from the server.
         if s.get("channel"):
-            lines.append(f"channel={s.get('channel')}")
+            channel = str(s["channel"]).strip()
+            if channel != "/":
+                channel = "/" + channel.strip("/") + "/"
+            lines.append(f"channel={channel}")
         # Notification toggles (optional, per-server)
         for k in _NOTIFY_KEYS:
             if k in s:
@@ -211,6 +225,13 @@ def generate_ttcom_conf() -> Path:
     # Restrict permissions since this contains plaintext passwords
     try:
         TTCOM_CONF_PATH.chmod(0o600)
+    except Exception:
+        pass
+    try:
+        app_conf = APP_DIR / "ttcom.conf"
+        if app_conf.resolve() != TTCOM_CONF_PATH.resolve():
+            import shutil
+            shutil.copyfile(str(TTCOM_CONF_PATH), str(app_conf))
     except Exception:
         pass
     return TTCOM_CONF_PATH

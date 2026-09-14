@@ -70,6 +70,26 @@ def logout_user() -> None:
 @auth_bp.route("/login", methods=["GET", "POST"])
 def login():
     from flask import render_template_string
+    def form(error: str = ""):
+        alert = f'<p role="alert" style="color:#d32f2f;font-weight:bold;">{error}</p>' if error else ""
+        return render_template_string(
+            "<!doctype html><html lang=en><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width, initial-scale=1'>"
+            "<title>Login - WebCom</title>"
+            "<style>"
+            "body{font-family:system-ui,-apple-system,sans-serif;line-height:1.6;margin:2rem auto;padding:0 1rem;max-width:32rem}"
+            "input{width:100%;box-sizing:border-box;padding:.5rem;margin:.25rem 0 1rem 0;border:1px solid #ccc;border-radius:4px;font:inherit}"
+            "button{cursor:pointer;padding:.6rem 1.5rem;background:#0b5ed7;color:#fff;border:none;border-radius:4px;font:inherit;font-weight:bold}"
+            "a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #005fcc;outline-offset:3px}"
+            "</style>"
+            "<main id=main tabindex=-1><h1>WebCom Login</h1>" + alert +
+            "<form method=post>"
+            "<p><label for=username><strong>Username</strong></label>"
+            "<input id=username name=username autocomplete=username required></p>"
+            "<p><label for=password><strong>Password</strong></label>"
+            "<input id=password name=password type=password autocomplete=current-password required></p>"
+            "<p><button type=submit>Log in</button></p></form></main></html>"
+        )
     # Fresh install: no admin user exists yet, so the login page is a dead end.
     # Send the user to the setup wizard instead.
     if not config_store.is_configured():
@@ -82,21 +102,8 @@ def login():
         if user == wc.get("admin_user") and config_store.verify_web_password(pw, wc.get("admin_hash", "")):
             login_user(user)
             return redirect(url_for("index"))
-        return render_template_string(
-            "<!doctype html><meta charset=utf-8>"
-            "<title>WebCom - Login</title>"
-            "<p style='color:red'>Invalid credentials.</p>"
-            "<form method=post>Username <input name=username><br>"
-            "Password <input name=password type=password><br>"
-            "<input type=submit value=Login></form>"
-        )
-    return render_template_string(
-        "<!doctype html><meta charset=utf-8>"
-        "<title>WebCom - Login</title>"
-        "<form method=post>Username <input name=username><br>"
-        "Password <input name=password type=password><br>"
-        "<input type=submit value=Login></form>"
-    )
+        return form("Invalid username or password.")
+    return form()
 
 
 @auth_bp.route("/logout")

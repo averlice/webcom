@@ -1,4 +1,4 @@
-﻿"""
+"""
 Built-in PowerCom event handling.
 """
 
@@ -225,15 +225,20 @@ def getUserInfo(server, userid):
     if server.shortname in serverCaches:
         if 'users' in serverCaches[server.shortname]:
             if userid in serverCaches[server.shortname]['users']: return serverCaches[server.shortname]['users'][userid]
-    if userid not in server.users: return {}
-    userName = server.users[userid].get('username') or ""
-    nickname = server.users[userid].get('nickname') or ""
-    admin = True if server.users[userid].usertype == '2' else False
-    userInfo = {'userName': userName, 'nickname': nickname, 'admin': admin}
+    default_info = {'userName': '', 'nickname': '', 'admin': False, 'statusmode': '0', 'statusmsg': ''}
+    if not hasattr(server, 'users') or userid not in server.users: return default_info
+    u = server.users[userid]
+    userName = u.get('username') if isinstance(u, dict) else getattr(u, 'username', '') or ""
+    nickname = u.get('nickname') if isinstance(u, dict) else getattr(u, 'nickname', '') or ""
+    usertype = u.get('usertype') if isinstance(u, dict) else getattr(u, 'usertype', '0')
+    statusmode = u.get('statusmode') if isinstance(u, dict) else getattr(u, 'statusmode', '0')
+    statusmsg = u.get('statusmsg') if isinstance(u, dict) else getattr(u, 'statusmsg', '') or ""
+    admin = True if str(usertype) == '2' else False
+    userInfo = {'userName': userName, 'nickname': nickname, 'admin': admin, 'statusmode': str(statusmode), 'statusmsg': str(statusmsg)}
     if not server.shortname in serverCaches:
         serverCaches[server.shortname] = {'users': {userid: userInfo}}
     else:
-        if  not 'users' in serverCaches[server.shortname]: serverCaches[server.shortname]['users'] = {userid: userInfo}
+        if not 'users' in serverCaches[server.shortname]: serverCaches[server.shortname]['users'] = {userid: userInfo}
         else: serverCaches[server.shortname]['users'][userid] = userInfo
     return serverCaches[server.shortname]['users'][userid]
 
@@ -263,7 +268,7 @@ def prittifyEvent(server, event):
     if userid is not None and userid != '0':
         userinfo = getUserInfo(server, userid)
         prittyName = prittifyName(userid, userinfo)
-        userTypeString = 'admin' if userinfo['admin'] == True else 'user'
+        userTypeString = 'admin' if userinfo.get('admin') else 'user'
     match event.event:
         case 'loggedin':
             loginMessage = _getRandomLineOrDefault('text/logins.txt', 'logged in')
@@ -298,7 +303,7 @@ def prittifyEvent(server, event):
                 output += f' Status set to {statusMode}.'
             if userinfo.get('statusmsg', '') != statusMSG:
                 output += f' Status message set to {event.parms.statusmsg}.'
-            if userinfo['nickname'] != nickname:
+            if userinfo.get('nickname') != nickname:
                 output += f' Nickname set to {nickname}.'
         case 'addfile':         
             fileName = event.parms.filename if 'filename' in event.parms else 'unknown file'

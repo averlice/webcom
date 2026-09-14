@@ -1,17 +1,21 @@
 # WebCom
 
-WebCom is a headless TeamTalk text client delivered as a web dashboard. Based on PowerCom (a fork of TeamTalk Commander).
+WebCom is a headless TeamTalk text client delivered as an accessible web dashboard. Based on PowerCom (a fork of TeamTalk Commander / TTCom by Doug Lee).
 
 ## Features
 
-- **Web Dashboard** - Access TeamTalk from any browser
-- **Multi-server support** - Connect to multiple TeamTalk servers
-- **Real-time events** - Live event stream via Server-Sent Events (SSE)
-- **Admin commands** - Kick, ban, broadcast, move users, etc.
-- **TTCom Private Messages** - Invisible to desktop clients
-- **Notifications** - ntfy, Prowl, Pushover, MG Notify, system notifications
+- **Web Dashboard** - Access and control TeamTalk from any browser
+- **Multi-server support** - Connect to multiple TeamTalk servers side by side
+- **Real-time event stream** - Live updates via Server-Sent Events (SSE)
+- **Notification history** - Every login, logout, message, kick, and status change is stored in a local SQLite database and browsable with server/kind/direction filters
+- **Private Message Inbox** - Sent and received PMs recorded as `nickname (username)`, with live updates
+- **Unread badge** - Nav shows how many notifications are unread; mark-all-read on the notifications page
+- **Ambiguous user handling** - If a name matches more than one user, WebCom lists the matches and asks you to pick (mirroring PowerCom's interactive 1/2/3 picker) instead of failing silently
+- **TTCom Private Messages** - Invisible to standard desktop clients, via the Find User flow
+- **Admin commands** - Kick, ban, broadcast, move users, op, geolocate, etc.
+- **Notifications** - ntfy, Prowl, Pushover, MG Notify, and system notification delivery (per-server, on `/settings`)
 - **Logs page** - Real-time application logs in the browser
-- **Server management** - Add/edit/remove servers via UI
+- **Server management** - Add/edit/remove servers via the UI
 
 ## Quick Start
 
@@ -35,6 +39,7 @@ docker compose logs -f webcom
 ```
 
 The dashboard will be available at:
+
 - **Local**: http://localhost:2032
 - **Network**: http://YOUR_SERVER_IP:2032
 
@@ -51,7 +56,7 @@ The dashboard will be available at:
    - **Nickname**: Display name in TeamTalk
    - **Channel**: Auto-join channel (e.g., `/text/`)
    - **Encrypted**: Enable if server uses TLS
-4. Save and login
+5. Save and login
 
 ## Configuration
 
@@ -59,8 +64,9 @@ All persistent data lives in the `./data` volume (gitignored):
 
 ```
 data/
-├── config.local.json    # WebCom config (web admin hash + TT servers)
-└── ttcom.conf           # Generated PowerCom config (auto-generated)
+├── config.local.json    # WebCom config (web admin hash, session secret, TT servers)
+├── ttcom.conf           # Generated PowerCom config (auto-generated)
+└── webcom.db            # SQLite notification / PM history
 ```
 
 ### Environment Variables
@@ -73,25 +79,27 @@ data/
 
 ### Security Notes
 
-- **TeamTalk passwords** are stored in plaintext in `config.local.json` - this is a TeamTalk protocol requirement, not our choice
-- **Web dashboard passwords** are argon2-hashed (stored in `config.local.json` as `admin_hash`)
-- The `./data` directory should be backed up and never committed to git
-- Session cookies are signed with a random secret stored in config
+- **TeamTalk passwords** are stored in plaintext in `config.local.json` - this is a TeamTalk protocol requirement, not our choice (bearware documents it; the login protocol transmits the account password as-is). They exist **only** in the `/data` volume, never in the repo or the image.
+- **Web dashboard passwords** are argon2-hashed; stored in `config.local.json` as `admin_hash`. The raw web password is never stored.
+- **Never commit** `data/`, `tor-data/`, `uv.lock`, `ttcom.conf`, or `config.local.json`. The `.gitignore` and `.dockerignore` already exclude them so they can't leak through a careless `git add .` or a container build.
+- Session cookies are signed with a random secret generated at setup (`session_secret` in `config.local.json`), so cookies can't be forged without volume access.
+- The notification database (`webcom.db`) contains chat text and nicknames but no passwords.
 
 ## Dashboard Pages
 
 | Page | Description |
 |------|-------------|
 | `/` | Live event stream (joins, messages, kicks) |
-| `/servers` | Manage TeamTalk servers (add/edit/delete) |
-| `/notifications` | Configure per-server notifications |
-| `/pmsg` | Send TTCom private messages (invisible to desktop clients) |
+| `/servers` | Manage TeamTalk servers (add/edit/delete/connect) |
+| `/notifications` | Live feed + filterable history of logins, messages, kicks, etc. |
+| `/settings` | Per-server notification delivery settings (ntfy, Prowl, ...) |
+| `/pmsg` | Send PMs + Message Inbox showing sent/received PMs |
 | `/admin` | Run admin commands (kick, ban, broadcast, move, etc.) |
 | `/logs` | Real-time application logs |
 
 ## Admin Commands
 
-Available via `/admin` page or API:
+Available via `/admin` page or API. If a username matches more than one user, WebCom presents a numbered list (`1. nickname (username)`) and runs the command against your choice:
 
 ```
 kick <user>                    # Kick from server
@@ -115,6 +123,13 @@ file get/delete                # File management
 |----------|--------|-------------|
 | `/api/events` | GET | SSE stream of live events |
 | `/api/command` | POST | Run TTCom command (`{shortname, command}`) |
+| `/api/users` | POST | Look up users matching a name (`{shortname, target}`) |
+| `/api/chat` | POST | Send a channel message (`{shortname, message}`) |
+| `/api/notifications` | GET | Notification history, filterable by `server`, `kind`, `direction`, `limit` |
+| `/api/notifications/unread` | GET | Unread notification count (optional `server`) |
+| `/api/notifications/mark-read` | POST | Mark notifications read (`{ids}` or `{server, kind, direction}`) |
+| `/api/notifications/clear` | POST | Delete notifications matching `{server, kind, direction}` |
+| `/api/servers/status` | GET | Per-server connection state |
 | `/api/logs` | GET | Recent application logs |
 | `/api/debug/bridge` | GET | Bridge connection status |
 
@@ -131,18 +146,19 @@ docker compose up -d
 
 ```
 webcom/
-├── app.py              # Flask application
-├── tt_bridge.py        # PowerCom/TTCom bridge
-├── config_store.py     # Configuration management
-├── auth.py             # Argon2 authentication
+├── app.py                 # Flask application + API routes
+├── tt_bridge.py           # PowerCom/TTCom bridge
+├── config_store.py        # Configuration management
+├── notification_store.py  # SQLite notification/PM history store
+├── auth.py                # Argon2 authentication
 ├── pages/
-│   └── __init__.py     # HTML templates
+│   └── __init__.py        # HTML templates
 powercom_core/
-├── features.py         # PowerCom event handling
-TTComCmd.py             # TTCom command processor
-ttapi.py                # TeamTalk protocol client
-conf.py                 # Configuration parser
-mplib/                  # Shared libraries
+├── features.py            # PowerCom event handling
+TTComCmd.py                # TTCom command processor
+ttapi.py                   # TeamTalk protocol client
+conf.py                    # Configuration parser
+mplib/                     # Shared libraries
 ```
 
 ## Troubleshooting
@@ -150,6 +166,7 @@ mplib/                  # Shared libraries
 ### Login hangs at "loggingIn"
 
 Check `/logs` page for state transitions. Common causes:
+
 - Wrong credentials
 - Wrong host/port
 - `encrypted` setting mismatch (true/false)
@@ -166,6 +183,7 @@ docker compose logs webcom
 ```
 
 Check for:
+
 - Port 2032 already in use
 - `./data` directory permissions
 - Missing config files
