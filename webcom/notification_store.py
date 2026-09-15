@@ -39,14 +39,30 @@ _local = threading.local()
 
 def _connect() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
-    if conn is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        _local.conn = conn
-    return conn
+    if conn is not None:
+        return conn
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Rollback journal (DELETE) instead of WAL: the store's writes are already
+    # serialized by the module lock, and unlike WAL it leaves no persistent
+    # -wal/-shm sidecar files. Those sidecar locks break on Docker Desktop host
+    # bind mounts after a container recreate ("unable to open database file"),
+    # which silently killed notification persistence. Retry a few times so a
+    # transient bind-mount race at boot cannot take the store down again.
+    last_err: Exception | None = None
+    for _ in range(3):
+        try:
+            conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=DELETE")
+            conn.execute("PRAGMA busy_timeout=5000")
+            _local.conn = conn
+            return conn
+        except sqlite3.Error as exc:
+            last_err = exc
+            time.sleep(0.25)
+    if last_err is not None:
+        raise last_err
+    raise sqlite3.OperationalError(f"unable to open database file: {DB_PATH}")
 
 
 def init() -> None:
