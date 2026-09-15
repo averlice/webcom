@@ -205,6 +205,49 @@ def clear(server: str | None = None, kind: str | None = None,
         return 0
 
 
+def backfill_peers(uid_label: dict[str, str]) -> int:
+    """Repair stored notification rows whose peer is an unresolved label.
+
+    Rows stored as 'User <id>', 'user <id>' or a PowerCom prittify blob
+    ("Nickname" (...) ... (userid N)) get their peer rewritten to the clean
+    label for the userid recorded in their extra JSON. Only users online at
+    the time of the call can be resolved, so callers should re-run this from
+    roster() whenever a user list is fetched. Returns the number of rows
+    updated.
+    """
+    if not uid_label:
+        return 0
+    patterns = (
+        "peer GLOB 'User [0-9]*' OR peer GLOB 'user [0-9]*' "
+        "OR peer LIKE '%(userid %'"
+    )
+    try:
+        with _lock:
+            conn = _connect()
+            rows = conn.execute(
+                "SELECT id, peer, extra FROM notifications "
+                f"WHERE extra IS NOT NULL AND extra != '' AND ({patterns})"
+            ).fetchall()
+            updates = []
+            for r in rows:
+                try:
+                    extra = json.loads(r["extra"] or "{}")
+                except Exception:
+                    continue
+                uid = extra.get("userid")
+                label = uid_label.get(str(uid)) if uid is not None else None
+                if label and label != r["peer"]:
+                    updates.append((label, r["id"]))
+            for label, nid in updates:
+                conn.execute("UPDATE notifications SET peer = ? WHERE id = ?", (label, nid))
+            conn.commit()
+            return len(updates)
+    except Exception as exc:
+        import logging
+        logging.getLogger("webcom").exception("notification backfill failed: %s", exc)
+        return 0
+
+
 def _row_to_dict(row: dict) -> dict:
     out = dict(row)
     try:

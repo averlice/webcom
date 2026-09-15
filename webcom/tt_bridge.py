@@ -29,6 +29,59 @@ else:
 # Normalize to a native OS path (Windows chdir rejects /c/wc form).
 APP_DIR = Path(os.path.abspath(str(APP_DIR)))
 
+# ---------------------------------------------------------------------------
+# Human-readable user labels.
+#
+# TeamTalk user IDs are ephemeral (reassigned every login), so WebCom persists
+# a *label* (nickname (username)) captured at event time rather than relying on
+# IDs. PowerCom's own caches (serverCaches) can hold polluted strings - the
+# prittified "Nickname" (username) ClientName from IP (userid N) blobs and the
+# initializeCache 'username'/'userName' key mismatch produce 'User <id>' or
+# full login-line junk. We therefore build labels ONLY from the live ttapi
+# roster (server.users) and a private snapshot, never from those caches.
+# ---------------------------------------------------------------------------
+_NAME_POLLUTION_MARKERS = (" from ", " (userid ", "powercom", "teamtalk", "windows ")
+
+_STATUSMODE_TEXT = {
+    "0": "available", "1": "away", "2": "questioning",
+    "4096": "available", "4097": "away", "4098": "questioning",
+    "256": "available", "257": "away", "258": "questioning",
+    "6144": "streaming media", "2048": "streaming media", "2304": "streaming media",
+}
+
+
+def _name_polluted(name: str) -> bool:
+    """True if a nickname field looks like a PowerCom prittify dump, not a user name."""
+    low = name.lower()
+    return any(marker in low for marker in _NAME_POLLUTION_MARKERS)
+
+
+def clean_user_label(record) -> str:
+    """Build "nickname (username)" from a ttapi user record.
+
+    Quoting is stripped and polluted cached names are discarded (falling back
+    to the username). Returns "" when nothing usable is available, so callers
+    can produce their own fallback.
+    """
+    def _field(record, key, fallback=""):
+        try:
+            val = record.get(key) if hasattr(record, "get") else None
+        except Exception:
+            val = None
+        return val if val is not None else fallback
+
+    nickname = str(_field(record, "nickname")).strip().strip("\"'")
+    username = str(_field(record, "username")).strip().strip("\"'")
+    if nickname and _name_polluted(nickname):
+        nickname = ""
+    if nickname and username:
+        return f"{nickname} ({username})"
+    return nickname or username
+
+
+def statusmode_text(mode) -> str:
+    return _STATUSMODE_TEXT.get(str(mode), f"unknown({mode})")
+
 
 class EventQueue:
     """Thread-safe pub/sub for SSE. One consumer per connection; events fanned out."""
@@ -301,6 +354,39 @@ class TTComBridge:
             # into a stable storage kind + human label. TeamTalk user IDs are
             # ephemeral (they change every login), so labels are captured here
             # at event time and the userid is only kept for reference.
+            #
+            # Private snapshot: PowerCom's serverCaches are unreliable (see the
+            # module docstring), so we keep our own userid -> label map. It is
+            # filled on loggedin/adduser/updateuser (while the user is still in
+            # server.users) and used for loggedout/removeuser/kicked events,
+            # where ttapi has already deleted the user from the live roster.
+            snapshot: dict[tuple[str, str], str] = {}
+
+            def _snapshot_set(server, uid, record):
+                label = clean_user_label(record)
+                if label:
+                    snapshot[(getattr(server, "shortname", ""), str(uid))] = label
+
+            def _live_user(server, uid):
+                users = getattr(server, "users", None)
+                if not users:
+                    return None
+                if uid in users:
+                    return users[uid]
+                for candidate in (int(uid), str(uid)):
+                    try:
+                        if candidate in users:
+                            return users[candidate]
+                    except (TypeError, ValueError):
+                        pass
+                for u in users.values():
+                    try:
+                        if str(u.get("userid")) == str(uid):
+                            return u
+                    except Exception:
+                        continue
+                return None
+
             def _notif_userid(event):
                 parms = event.parms
                 for key in ("userid", "srcuserid", "destuserid", "kickerid"):
@@ -333,12 +419,16 @@ class TTComBridge:
                 uid = _notif_userid(event)
                 if not uid:
                     return ""
-                info = pcom_features.getUserInfo(server, uid)
-                nickname = (info.get("nickname") or "").strip()
-                username = (info.get("userName") or "").strip()
-                if nickname and username:
-                    return f"{nickname} ({username})"
-                return nickname or username or f"user {uid}"
+                sn = getattr(server, "shortname", "")
+                cached = snapshot.get((sn, str(uid)))
+                if cached:
+                    return cached
+                live = _live_user(server, uid)
+                if live is not None:
+                    label = clean_user_label(live)
+                    if label:
+                        return label
+                return f"user {uid}"
 
             def _notif_extra(event):
                 extra = {}
@@ -360,6 +450,14 @@ class TTComBridge:
                 kind = _notif_kind(event)
                 if kind is None:
                     return
+                ev = getattr(event, "event", "") or ""
+                uid = _notif_userid(event)
+                if uid and ev in ("loggedin", "adduser", "updateuser"):
+                    # Capture/refresh the snapshot while the user is still in
+                    # the live roster so later logout/leave events can resolve.
+                    live = _live_user(server, uid)
+                    if live is not None:
+                        _snapshot_set(server, uid, live)
                 peer = _notif_peer(server, event)
                 row = notification_store.insert(
                     server=getattr(server, "shortname", ""),
@@ -637,9 +735,9 @@ class TTComBridge:
         if target.startswith("#") and target[1:].isdigit():
             for m in matches:
                 if m.get("userid") == target[1:]:
-                    return self._label_from_match(m)
+                    return m.get("label") or self._label_from_match(m)
         if len(matches) == 1:
-            return self._label_from_match(matches[0])
+            return matches[0].get("label") or self._label_from_match(matches[0])
         return target or ""
 
     @staticmethod
@@ -649,6 +747,90 @@ class TTComBridge:
         if nickname and username:
             return f"{nickname} ({username})"
         return nickname or username or (f"user {match.get('userid')}" if match.get("userid") else "")
+
+    def _user_record(self, server, u) -> dict:
+        """Clean, presentable record for one ttapi user (for roster/find_users)."""
+        uid = str(getattr(u, "userid", ""))
+        nickname = str(u.get("nickname") or "").strip().strip('"')
+        if _name_polluted(nickname):
+            nickname = ""
+        username = str(u.get("username") or "").strip().strip('"')
+        channel = ""
+        cid = u.get("chanid")
+        raw_channel = u.get("channel")
+        if raw_channel:
+            channel = str(raw_channel)
+        elif cid:
+            try:
+                channel = server.channelname(cid)
+            except Exception:
+                channel = f"<channel {cid}>"
+        usertype = str(u.get("usertype") or "")
+        rec = {
+            "userid": uid,
+            "nickname": nickname,
+            "username": username,
+            "label": clean_user_label(u) or (f"user {uid}" if uid else ""),
+            "usertype": usertype,
+            "admin": usertype == "2",
+            "statusmode": statusmode_text(u.get("statusmode") or ""),
+            "statusmsg": str(u.get("statusmsg") or ""),
+            "ipaddr": str(u.get("ipaddr") or ""),
+            "clientname": str(u.get("clientname") or ""),
+            "chanid": str(cid) if cid else "",
+            "channel": channel,
+        }
+        try:
+            rec["me"] = bool(u is getattr(server, "me", None))
+        except Exception:
+            rec["me"] = False
+        return rec
+
+    def roster(self, shortname: str) -> dict:
+        """Full live user list for a server, with clean labels and channel info.
+
+        Also best-effort repairs notification rows that were stored with
+        unresolved labels ('User <id>' or prittify junk) using the live roster,
+        since TeamTalk user IDs change every login.
+        """
+        if not self._ready or self._cmd is None:
+            self.start()
+        with self._command_lock:
+            try:
+                if shortname:
+                    self._cmd.onecmd(f"switch {shortname}")
+                server = self._cmd.curServer
+            except Exception as exc:
+                self.logs.add("WARNING", f"roster: cannot switch to {shortname}: {exc}", "webcom")
+                return {"server": shortname, "users": [], "me": None}
+            users = sorted(
+                (self._user_record(server, u) for u in server.users.values()),
+                key=lambda r: (r["label"] or "").lower(),
+            )
+            me = None
+            try:
+                me = self._user_record(server, server.me)
+            except Exception:
+                me = None
+        self.backfill_notification_peers(users)
+        return {"server": shortname, "users": users, "me": me}
+
+    @staticmethod
+    def backfill_notification_peers(users: list[dict]) -> int:
+        """Map live userids to labels and repair unresolved notification rows.
+
+        Only rows whose peer is still an unresolved form are rewritten, so a
+        later visit to the Users page repairs whatever is online at the time.
+        Returns the number of rows updated.
+        """
+        uid_label = {}
+        for u in users:
+            uid = u.get("userid")
+            if uid and u.get("label"):
+                uid_label[str(uid)] = u["label"]
+        if not uid_label:
+            return 0
+        return notification_store.backfill_peers(uid_label)
 
     def find_users(self, shortname: str, target: str) -> list[dict]:
         """Return all users on a server whose nickname/username matches target.
@@ -678,16 +860,7 @@ class TTComBridge:
                 needle = target.lower()
                 matches = [u for u in users
                            if needle in server.nonEmptyNickname(u, "dnc").lower()]
-            results = []
-            for u in matches:
-                nickname = server.nonEmptyNickname(u, "dnc")
-                username = u.get("username") or ""
-                results.append({
-                    "userid": str(u.userid),
-                    "nickname": nickname,
-                    "username": username,
-                    "label": self._label_from_match({"nickname": nickname, "username": username, "userid": str(u.userid)}),
-                })
+            results = [self._user_record(server, u) for u in matches]
             return results
 
 

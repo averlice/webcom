@@ -325,6 +325,16 @@ def notifications():
     return render_template_string(notifications_html(config_store.list_servers()))
 
 
+@app.route("/users")
+def users_page():
+    guard = _auth_guard()
+    if guard:
+        return guard
+    bridge.start()
+    from .pages import users_html
+    return render_template_string(users_html(config_store.list_servers()))
+
+
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     guard = _auth_guard()
@@ -428,6 +438,22 @@ def api_users():
     target = data.get("target", "")
     users = bridge.find_users(sn, target)
     return {"ok": True, "users": users}
+
+
+@app.route("/api/users/roster")
+def api_users_roster():
+    guard = _api_auth_guard()
+    if guard:
+        return guard
+    servers = config_store.list_servers()
+    sn = request.args.get("server") or None
+    if sn:
+        roster = bridge.roster(sn)
+        return {"ok": True, "roster": roster}
+    out = []
+    for s in servers:
+        out.append(bridge.roster(s.get("shortname", "")))
+    return {"ok": True, "rosters": out}
 
 
 @app.route("/api/notifications")

@@ -559,7 +559,7 @@ class PowerComEventHandler:
         if self.server.shortname  not in serverCaches: serverCaches[self.server.shortname] = {'users': {}, 'channels': {}}
         print('ok')
         for uid, u in self.server.users.items():
-            userInfo = {'username': u['username'], 'usertype': u['usertype']}
+            userInfo = {'userName': u['username'], 'usertype': u['usertype']}
             userInfo['nickname'] = prittifyName(uid, userInfo)
             serverCaches[self.server.shortname]['users'][uid] = userInfo
         for cid, c in self.server.channels.items():

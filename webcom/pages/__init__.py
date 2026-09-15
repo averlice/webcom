@@ -205,6 +205,7 @@ BASE = """<!doctype html>
     <ul>
       <li><a href="/" {nav_dashboard}>Dashboard</a></li>
       <li><a href="/servers" {nav_servers}>Servers</a></li>
+      <li><a href="/users" {nav_users}>Users</a></li>
       <li><a href="/notifications" {nav_notifications}>Notifications <span id="notif_badge" class="nav-badge" style="display:none;"></span></a></li>
       <li><a href="/settings" {nav_settings}>Settings</a></li>
       <li><a href="/pmsg" {nav_pmsg}>Private Messages</a></li>
@@ -240,6 +241,7 @@ def _wrap(title: str, content: str, active: str = "dashboard") -> str:
     nav_attrs = {
         "nav_dashboard": 'aria-current="page"' if active == "dashboard" else "",
         "nav_servers": 'aria-current="page"' if active == "servers" else "",
+        "nav_users": 'aria-current="page"' if active == "users" else "",
         "nav_notifications": 'aria-current="page"' if active == "notifications" else "",
         "nav_settings": 'aria-current="page"' if active == "settings" else "",
         "nav_pmsg": 'aria-current="page"' if active == "pmsg" else "",
@@ -1585,3 +1587,128 @@ loadLogs();
 </script>
 """
     return _wrap("Application Logs", content, active="logs")
+
+
+# ---------------------------------------------------------------------------
+# Users (whole-server roster)
+# ---------------------------------------------------------------------------
+def users_html(servers: list[dict]) -> str:
+    server_opts = "".join(f'<option value="{html.escape(s.get("shortname", ""))}">{html.escape(s.get("shortname", ""))}</option>' for s in servers)
+
+    content = f"""
+<p>Whole-server roster: everyone connected right now (not just the current channel). TeamTalk user IDs change on every login, so identity is shown as <code>nickname (username)</code>.</p>
+
+<div class="actions-group" style="margin-bottom:.5rem;">
+  <fieldset style="display:inline-flex;gap:.75rem;padding:.25rem .75rem;margin:0;align-items:center;">
+    <legend>View</legend>
+    <label>Server
+      <select id="roster_server" onchange="loadRoster()">
+        {server_opts}
+      </select>
+    </label>
+    <label>Filter <input type="search" id="roster_filter" placeholder="filter by name / user" oninput="renderRows()"></label>
+  </fieldset>
+  <button type="button" onclick="loadRoster()">Refresh</button>
+  <label><input type="checkbox" id="roster_auto" checked onchange="toggleAuto()"> Auto-refresh (10s)</label>
+</div>
+
+<div id="roster_status" role="status" aria-live="polite" class="status-message" style="display:none;">Loading roster...</div>
+<div id="roster_empty" class="status-message" style="display:none;">No users connected to this server.</div>
+
+<table id="roster_table" style="width:100%;border-collapse:collapse;font-size:.9rem;">
+  <thead>
+    <tr>
+      <th scope="col" style="text-align:left;">User</th>
+      <th scope="col" style="text-align:left;">Username</th>
+      <th scope="col" style="text-align:left;">ID</th>
+      <th scope="col" style="text-align:left;">Type</th>
+      <th scope="col" style="text-align:left;">Channel</th>
+      <th scope="col" style="text-align:left;">Status</th>
+      <th scope="col" style="text-align:left;">Client</th>
+      <th scope="col" style="text-align:left;">IP</th>
+    </tr>
+  </thead>
+  <tbody id="roster_body"></tbody>
+</table>
+
+<script>
+var rosterData = {{ users: [], me: '' }};
+var rosterTimer = null;
+var es = new EventSource('/api/events');
+
+function curServer() {{ return document.getElementById('roster_server').value; }}
+
+function loadRoster() {{
+  var st = document.getElementById('roster_status');
+  st.style.display = 'block';
+  st.textContent = 'Loading roster...';
+  fetch('/api/users/roster?server=' + encodeURIComponent(curServer()))
+    .then(function(r) {{ return r.json(); }})
+    .then(function(d) {{
+      if (!d.ok) throw new Error(d.error || 'Failed to load roster');
+      rosterData = d.roster || {{ users: [], me: null }};
+      renderRows();
+      st.style.display = 'none';
+    }})
+    .catch(function(err) {{
+      st.style.display = 'block';
+      st.textContent = 'Roster error: ' + err;
+    }});
+}}
+
+function esc(v) {{
+  var out = document.createElement('span');
+  out.textContent = v == null ? '' : String(v);
+  return out.innerHTML;
+}}
+
+function renderRows() {{
+  var body = document.getElementById('roster_body');
+  body.innerHTML = '';
+  var filter = (document.getElementById('roster_filter').value || '').toLowerCase();
+  var rows = [];
+  (rosterData.users || []).forEach(function(u) {{
+    if (filter && (u.label || '').toLowerCase().indexOf(filter) === -1 &&
+        (u.username || '').toLowerCase().indexOf(filter) === -1 &&
+        (u.nickname || '').toLowerCase().indexOf(filter) === -1) return;
+    rows.push('<tr>' +
+      '<td>' + esc(u.label) + (u.me ? ' <span title="you">(me)</span>' : '') + '</td>' +
+      '<td>' + esc(u.username) + '</td>' +
+      '<td>' + esc(u.userid) + '</td>' +
+      '<td>' + (u.admin ? 'Admin' : 'User') + '</td>' +
+      '<td>' + esc(u.channel) + '</td>' +
+      '<td>' + esc(u.statusmode) + ((u.statusmsg ? ' &mdash; ' + esc(u.statusmsg) : '')) + '</td>' +
+      '<td>' + esc(u.clientname) + '</td>' +
+      '<td>' + esc(u.ipaddr) + '</td>' +
+      '</tr>');
+  }});
+  body.innerHTML = rows.join('');
+  document.getElementById('roster_empty').style.display = rows.length ? 'none' : 'block';
+}}
+
+function toggleAuto() {{
+  if (rosterTimer) clearInterval(rosterTimer);
+  if (document.getElementById('roster_auto').checked) rosterTimer = setInterval(loadRoster, 10000);
+}}
+
+function refreshSoon() {{
+  if (!document.getElementById('roster_auto').checked) return;
+  if (rosterTimer) clearInterval(rosterTimer);
+  loadRoster();
+  rosterTimer = setInterval(loadRoster, 10000);
+}}
+
+es.onmessage = function(e) {{
+  try {{
+    var d = JSON.parse(e.data);
+    if (d.type !== 'notification') return;
+    var kinds = {{ login:1, logout:1, joined:1, left:1, status:1, kick:1 }};
+    if (kinds[d.kind]) refreshSoon();
+  }} catch (err) {{ /* ignore malformed events */ }}
+}};
+
+loadRoster();
+if (document.getElementById('roster_auto').checked) rosterTimer = setInterval(loadRoster, 10000);
+</script>
+"""
+    return _wrap("Users", content, active="users")

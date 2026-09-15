@@ -11,6 +11,8 @@ WebCom is a headless TeamTalk text client delivered as an accessible web dashboa
 - **Private Message Inbox** - Sent and received PMs recorded as `nickname (username)`, with live updates
 - **Unread badge** - Nav shows how many notifications are unread; mark-all-read on the notifications page
 - **Ambiguous user handling** - If a name matches more than one user, WebCom lists the matches and asks you to pick (mirroring PowerCom's interactive 1/2/3 picker) instead of failing silently
+- **Users page** - Whole-server roster (not just the current channel) showing nickname/(username)/user type/channel/status/client/IP, with live auto-refresh
+- **Stable identities** - TeamTalk user IDs change every login, so all history and rosters use clean `nickname (username)` labels; stale `User <id>` rows are repaired automatically from the live roster
 - **TTCom Private Messages** - Invisible to standard desktop clients, via the Find User flow
 - **Admin commands** - Kick, ban, broadcast, move users, op, geolocate, etc.
 - **Notifications** - ntfy, Prowl, Pushover, MG Notify, and system notification delivery (per-server, on `/settings`)
@@ -91,6 +93,7 @@ data/
 |------|-------------|
 | `/` | Live event stream (joins, messages, kicks) |
 | `/servers` | Manage TeamTalk servers (add/edit/delete/connect) |
+| `/users` | Whole-server roster with status/channel/client/IP, auto-refresh |
 | `/notifications` | Live feed + filterable history of logins, messages, kicks, etc. |
 | `/settings` | Per-server notification delivery settings (ntfy, Prowl, ...) |
 | `/pmsg` | Send PMs + Message Inbox showing sent/received PMs |
@@ -124,6 +127,7 @@ file get/delete                # File management
 | `/api/events` | GET | SSE stream of live events |
 | `/api/command` | POST | Run TTCom command (`{shortname, command}`) |
 | `/api/users` | POST | Look up users matching a name (`{shortname, target}`) |
+| `/api/users/roster` | GET | Whole-server roster (`?server=shortname`); repairs stale notification labels |
 | `/api/chat` | POST | Send a channel message (`{shortname, message}`) |
 | `/api/notifications` | GET | Notification history, filterable by `server`, `kind`, `direction`, `limit` |
 | `/api/notifications/unread` | GET | Unread notification count (optional `server`) |
