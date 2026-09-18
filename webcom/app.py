@@ -66,6 +66,8 @@ def _validated_server(data: dict) -> dict:
         connect_on_start if isinstance(connect_on_start, bool)
         else str(connect_on_start).strip().lower() in {"1", "true", "yes", "on"}
     )
+    server.pop("hidden", None)
+    server.pop("excludeUsers", None)
     return server
 
 
@@ -92,7 +94,7 @@ def index():
         return guard
     from .pages import dashboard_html
     bridge.start()
-    servers = config_store.list_servers()
+    servers = config_store.visible_servers()
     servers_status = bridge.get_servers_status()
     return render_template_string(dashboard_html(servers, servers_status))
 
@@ -154,11 +156,38 @@ def servers():
         data = request.get_json(silent=True) or request.form.to_dict()
         if not request.is_json:
             data["connectOnStart"] = "connectOnStart" in request.form
+        # The edit form sends the ORIGINAL short name when renaming, so the
+        # route can move the server entry (and its history) instead of
+        # silently creating a duplicate under the new name.
+        previous_sn = str(data.get("previous_shortname") or "").strip()
+        data.pop("previous_shortname", None)
         try:
             data = _validated_server(data)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}, 400
-        config_store.add_server(data)
+        lookup_sn = previous_sn or data["shortname"]
+        old = config_store.get_server(lookup_sn)
+        if previous_sn and previous_sn != data["shortname"]:
+            try:
+                if old is None:
+                    return {"ok": False, "error": f"Server {previous_sn!r} not found"}, 404
+                if config_store.get_server(data["shortname"]) is not None:
+                    return {"ok": False, "error": f"A server named {data['shortname']!r} already exists"}, 400
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}, 400
+        # Merge into the existing entry so per-server notification settings and
+        # inheritNotifyDefaults survive an edit. Only the fields the form posted
+        # are updated; everything else is kept.
+        merged = dict(old) if old else {}
+        merged.update(data)
+        merged["shortname"] = data["shortname"]
+        try:
+            config_store.add_server(merged)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}, 400
+        if previous_sn and previous_sn != data["shortname"]:
+            config_store.delete_server(previous_sn)
+            notification_store.rename_server(previous_sn, data["shortname"])
         config_store.generate_ttcom_conf()
         bridge.refresh_and_connect()
         return {"ok": True}
@@ -210,9 +239,20 @@ def _apply_notification_settings(data: dict, from_form: bool = False) -> None:
     sn = data.get("shortname")
     s = config_store.get_server(sn)
     if s:
-        for k in _NOTIFY_FIELDS:
-            if k in data:
-                s[k] = data[k]
+        # Saving a server's own settings is an explicit override of the
+        # global defaults. Setting the flag also serves as the way back:
+        # a posted value of ``False`` here opts the server out of
+        # inheriting global values.
+        if "inheritNotifyDefaults" in data:
+            inherit = bool(data["inheritNotifyDefaults"])
+            s["inheritNotifyDefaults"] = inherit
+        else:
+            inherit = True
+            s["inheritNotifyDefaults"] = True
+        if not inherit:
+            for k in _NOTIFY_FIELDS:
+                if k in data:
+                    s[k] = data[k]
         config_store.add_server(s)
         config_store.generate_ttcom_conf()
 
@@ -322,7 +362,7 @@ def notifications():
         return guard
     bridge.start()
     from .pages import notifications_html
-    return render_template_string(notifications_html(config_store.list_servers()))
+    return render_template_string(notifications_html(config_store.visible_servers()))
 
 
 @app.route("/users")
@@ -332,7 +372,7 @@ def users_page():
         return guard
     bridge.start()
     from .pages import users_html
-    return render_template_string(users_html(config_store.list_servers()))
+    return render_template_string(users_html(config_store.visible_servers()))
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -342,10 +382,54 @@ def settings():
         return guard
     if request.method == "POST":
         data = request.get_json(silent=True) or request.form.to_dict()
-        _apply_notification_settings(data, from_form=not request.is_json)
-        return {"ok": True}
+        from .notify_test import newly_enabled, send_test_push
+        test_details: dict | None = None
+        if bool(data.pop("notif_defaults", False)):
+            prev = config_store.get_notify_defaults()
+            config_store.save_notify_defaults(data)
+            config_store.generate_ttcom_conf()
+            restored = config_store.get_notify_defaults()
+            if newly_enabled(prev, restored):
+                results = send_test_push(
+                    restored,
+                    "WebCom test notification",
+                    "We've enabled services in your global defaults. This message proves your "
+                    "push notifications are working.",
+                )
+                test_details = {"results": results, "scope": "global"}
+        else:
+            sn = str(data.get("shortname") or "").strip()
+            prev_server = config_store.get_server(sn) if sn else None
+            prev = (config_store.effective_notify_settings(prev_server)
+                    if prev_server else {})
+            _apply_notification_settings(data, from_form=not request.is_json)
+            new_server = config_store.get_server(sn) if sn else None
+            restored = (config_store.effective_notify_settings(new_server)
+                        if new_server else {})
+            if newly_enabled(prev, restored):
+                results = send_test_push(
+                    restored,
+                    "WebCom test notification",
+                    f"We've enabled services on {sn}. This message proves your push "
+                    "notifications are working for that server.",
+                )
+                test_details = {"results": results, "scope": sn}
+        # PowerCom only reads settings when its config is reloaded. Run its own
+        # refresh verb so changed notification prefs go live without a container
+        # restart (a changed push/toggle set needs no reconnect; readServers
+        # only relogs servers whose host/port/credentials actually changed).
+        try:
+            bridge.refresh_and_connect()
+        except Exception:
+            import logging
+            logging.getLogger("webcom").exception("settings refresh failed")
+        response = {"ok": True}
+        if test_details:
+            response["test"] = test_details
+        return response
     from .pages import settings_html
-    return render_template_string(settings_html(config_store.list_servers()))
+    return render_template_string(settings_html(config_store.visible_servers(),
+                                                config_store.get_notify_defaults()))
 
 
 @app.route("/pmsg", methods=["GET", "POST"])
@@ -362,7 +446,7 @@ def pmsg():
         out = bridge.send_pm(sn, target, text, is_ttcom=is_ttcom)
         return {"ok": True, "output": out}
     from .pages import pmsg_html
-    return render_template_string(pmsg_html(config_store.list_servers()))
+    return render_template_string(pmsg_html(config_store.visible_servers()))
 
 
 @app.route("/admin", methods=["GET", "POST"])
@@ -380,7 +464,7 @@ def admin():
             return result
         return {"ok": True, "output": result.get("output", [])}
     from .pages import admin_html
-    return render_template_string(admin_html(config_store.list_servers()))
+    return render_template_string(admin_html(config_store.visible_servers()))
 
 
 @app.route("/logs")
@@ -445,7 +529,7 @@ def api_users_roster():
     guard = _api_auth_guard()
     if guard:
         return guard
-    servers = config_store.list_servers()
+    servers = config_store.visible_servers()
     sn = request.args.get("server") or None
     if sn:
         roster = bridge.roster(sn)

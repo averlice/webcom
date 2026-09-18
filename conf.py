@@ -276,6 +276,7 @@ class Servers(dict):
         # Scratchpads for recursion handling here.
         self.shortname = ""
         self.includes = lIncludes
+        self.doneIncludes = set()
         try:
             for shortname,parms in lServers.items():
                 self.shortname = shortname
@@ -284,7 +285,12 @@ class Servers(dict):
                 self.doneIncludes = set()
                 self._applyParms(server, parms)
         finally:
-            del self.includes, self.doneIncludes, self.shortname
+            for _attr in ("includes", "doneIncludes", "shortname"):
+                if hasattr(self, _attr):
+                    try:
+                        delattr(self, _attr)
+                    except AttributeError:
+                        pass
         # Apply and remove any defaults list.
         # Also apply TTCom defaults where not overridden.
         defaults = self.pop("defaults", {})

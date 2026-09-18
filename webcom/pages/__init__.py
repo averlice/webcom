@@ -660,8 +660,12 @@ def servers_html(servers: list[dict], servers_status: list[dict] | None = None) 
     <label><input id="f_connect_on_start" name="connectOnStart" type="checkbox" value="1" checked> Connect on startup</label>
   </div>
   <div class="form-group">
+    <label><input id="f_auto_reconnect" name="autoReconnect" type="checkbox" value="1"> Auto-reconnect after a connection drop</label>
+  </div>
+  <div class="form-group">
     <label><input id="f_encrypted" name="encrypted" type="checkbox" value="1"> Encrypted connection (TLS)</label>
   </div>
+  <input type="hidden" id="f_previous_shortname" name="previous_shortname">
   <div class="actions-group">
     <button type="submit" class="primary" id="save_btn">Save Server</button>
     <button type="button" id="cancel_edit_btn" onclick="resetForm()" style="display:none;">Cancel Edit</button>
@@ -682,8 +686,8 @@ async function editServer(sn) {{
     if (!d.ok) return alert(d.error);
     const s = d.server;
     document.getElementById('form_heading').textContent = 'Edit Server: ' + s.shortname;
+    document.getElementById('f_previous_shortname').value = s.shortname;
     document.getElementById('f_shortname').value = s.shortname;
-    document.getElementById('f_shortname').readOnly = true;
     document.getElementById('f_host').value = s.host || '';
     document.getElementById('f_tcpport').value = s.tcpport || 10333;
     document.getElementById('f_udpport').value = s.udpport || 10333;
@@ -693,11 +697,13 @@ async function editServer(sn) {{
     document.getElementById('f_status').value = s.status || '';
     document.getElementById('f_channel').value = s.channel || '/text/';
     document.getElementById('f_connect_on_start').checked = s.connectOnStart !== false;
+    var autoDef = (s.autoReconnect !== undefined) ? !!s.autoReconnect : (s.connectOnStart !== false);
+    document.getElementById('f_auto_reconnect').checked = autoDef;
     document.getElementById('f_encrypted').checked = !!s.encrypted;
     document.getElementById('save_btn').textContent = 'Update Server';
     document.getElementById('cancel_edit_btn').style.display = 'inline-block';
     document.getElementById('f_host').focus();
-    showAlert('Loaded server settings for ' + s.shortname + '.');
+    showAlert('Loaded server settings for ' + s.shortname + '. Renaming the short name on save migrates its notification history.');
   }} catch (e) {{
     alert('Failed to load server: ' + e);
   }}
@@ -706,8 +712,9 @@ async function editServer(sn) {{
 function resetForm() {{
   document.getElementById('form_heading').textContent = 'Add a Server';
   document.getElementById('serverForm').reset();
-  document.getElementById('f_shortname').readOnly = false;
+  document.getElementById('f_previous_shortname').value = '';
   document.getElementById('f_connect_on_start').checked = true;
+  document.getElementById('f_auto_reconnect').checked = true;
   document.getElementById('save_btn').textContent = 'Save Server';
   document.getElementById('cancel_edit_btn').style.display = 'none';
   showAlert('Add server form reset.');
@@ -717,6 +724,7 @@ async function saveServer(e) {{
   e.preventDefault();
   var payload = {{
     shortname: document.getElementById('f_shortname').value.trim(),
+    previous_shortname: document.getElementById('f_previous_shortname').value.trim(),
     host: document.getElementById('f_host').value.trim(),
     tcpport: parseInt(document.getElementById('f_tcpport').value) || 10333,
     udpport: parseInt(document.getElementById('f_udpport').value) || 10333,
@@ -726,7 +734,8 @@ async function saveServer(e) {{
     status: document.getElementById('f_status').value.trim(),
     channel: document.getElementById('f_channel').value.trim() || '/text/',
     connectOnStart: document.getElementById('f_connect_on_start').checked,
-    encrypted: document.getElementById('f_encrypted').checked
+    autoReconnect: document.getElementById('f_auto_reconnect').checked,
+    encrypted: document.getElementById('f_encrypted').checked,
   }};
 
   try {{
@@ -792,37 +801,108 @@ async function disconnectServer(sn) {{
 # ---------------------------------------------------------------------------
 # Settings (includes per-server notification configuration)
 # ---------------------------------------------------------------------------
-def settings_html(servers: list[dict]) -> str:
+def settings_html(servers: list[dict], defaults: dict | None = None) -> str:
+    from .. import config_store
+    defaults = defaults or {}
+    defaults_json = json.dumps(defaults)
+
+    def _on(val) -> bool:
+        return val not in (None, False, 0, "0", "")
+
     rows = []
     for s in servers:
         sn = html.escape(s.get("shortname", ""))
-        lout = "Enabled" if s.get("notifyloginout", True) else "Disabled"
-        msg = "Enabled" if s.get("notifymessage", True) else "Disabled"
-        sys_n = "Enabled" if s.get("systemnotify", False) else "Disabled"
-        ntfy = "Enabled" if s.get("ntfy", False) else "Disabled"
-        prowl = "Enabled" if s.get("prowl", False) else "Disabled"
-        mg = "Enabled" if s.get("mgnotify", False) else "Disabled"
-        push = "Enabled" if s.get("pushover", False) else "Disabled"
-
+        eff = config_store.effective_notify_settings(s, defaults)
+        inherit = s.get("inheritNotifyDefaults", True)
+        cells = ""
+        for key in ("notifyloginout", "notifymessage", "systemnotify",
+                    "ntfy", "prowl", "mgnotify", "pushover"):
+            src = "server" if (not inherit and key in s) else "global"
+            label = "Enabled" if _on(eff.get(key)) else "Disabled"
+            src_span = ('<span class="muted" title="Set on this server only">(server)</span>'
+                        if src == "server"
+                        else '<span class="muted" title="Inherited from global defaults">(global)</span>')
+            cells += f'<td>{label} {src_span}</td>'
         rows.append(
-            f'<tr>'
-            f'<td><strong>{sn}</strong></td>'
-            f'<td>{lout}</td>'
-            f'<td>{msg}</td>'
-            f'<td>{sys_n}</td>'
-            f'<td>{ntfy}</td>'
-            f'<td>{prowl}</td>'
-            f'<td>{mg}</td>'
-            f'<td>{push}</td>'
-            f'<td><button type="button" onclick="loadServerNotifs(\'{sn}\')">Configure</button></td>'
-            f'</tr>'
+            f'<tr><td><strong>{sn}</strong></td>{cells}'
+            f'<td><button type="button" onclick="loadServerNotifs(\'{sn}\')">Configure</button></td></tr>'
         )
 
     server_opts = "".join(f'<option value="{html.escape(s.get("shortname", ""))}">{html.escape(s.get("shortname", ""))}</option>' for s in servers)
     servers_json = json.dumps({s.get("shortname"): s for s in servers})
 
     content = f"""
-<p>All WebCom settings live here. Notification behavior (which events notify you, and which push services carry them) is configured per server below.</p>
+<p>All WebCom settings live here. Notification behavior starts from the <strong>Global Defaults</strong> below; individual servers can then override anything they need to.</p>
+
+<h2>Global Notification Defaults</h2>
+<form id="defaultsForm" method="post" action="/settings" onsubmit="saveDefaults(event)">
+  <fieldset>
+    <legend>Event Triggers</legend>
+    <div class="form-group">
+      <label><input id="g_notifyloginout" type="checkbox" name="notifyloginout" value="1"> Notify when users log in or log out</label>
+    </div>
+    <div class="form-group">
+      <label><input id="g_notifymessage" type="checkbox" name="notifymessage" value="1"> Notify on incoming channel and private messages</label>
+    </div>
+    <div class="form-group">
+      <label><input id="g_systemnotify" type="checkbox" name="systemnotify" value="1"> Host system desktop notification</label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>ntfy Push Notifications</legend>
+    <div class="form-group">
+      <label><input id="g_ntfy" type="checkbox" name="ntfy" value="1"> Enable ntfy</label>
+    </div>
+    <div class="form-group">
+      <label for="g_ntfyUrl">ntfy Server URL</label>
+      <input id="g_ntfyUrl" name="ntfyUrl" placeholder="https://ntfy.sh">
+    </div>
+    <div class="form-group">
+      <label for="g_ntfyTopic">ntfy Topic</label>
+      <input id="g_ntfyTopic" name="ntfyTopic" placeholder="e.g. my-teamtalk-topic">
+    </div>
+    <div class="form-group">
+      <label for="g_ntfyUser">ntfy Username (optional)</label>
+      <input id="g_ntfyUser" name="ntfyUser">
+    </div>
+    <div class="form-group">
+      <label for="g_ntfyPassword">ntfy Password (optional)</label>
+      <input id="g_ntfyPassword" name="ntfyPassword" type="password">
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Other Push Services</legend>
+    <div class="form-group">
+      <label><input id="g_prowl" type="checkbox" name="prowl" value="1"> Enable Prowl (iOS)</label>
+    </div>
+    <div class="form-group">
+      <label for="g_prowlkey">Prowl API Key</label>
+      <input id="g_prowlkey" name="prowlkey">
+    </div>
+    <div class="form-group">
+      <label><input id="g_mgnotify" type="checkbox" name="mgnotify" value="1"> Enable MG Notify</label>
+    </div>
+    <div class="form-group">
+      <label for="g_mgnotifykey">MG Notify API Key</label>
+      <input id="g_mgnotifykey" name="mgnotifykey">
+    </div>
+    <div class="form-group">
+      <label><input id="g_pushover" type="checkbox" name="pushover" value="1"> Enable Pushover</label>
+    </div>
+    <div class="form-group">
+      <label for="g_pushoveruser">Pushover User Key</label>
+      <input id="g_pushoveruser" name="pushoveruser">
+    </div>
+    <div class="form-group">
+      <label for="g_pushovertoken">Pushover App Token</label>
+      <input id="g_pushovertoken" name="pushovertoken">
+    </div>
+  </fieldset>
+
+  <button type="submit" class="primary">Save Global Defaults</button>
+</form>
 
 <h2>Notification Preferences by Server</h2>
 <div class="table-wrap">
@@ -844,6 +924,7 @@ def settings_html(servers: list[dict]) -> str:
       {"".join(rows) if rows else '<tr><td colspan="9">No servers configured.</td></tr>'}
     </tbody>
   </table>
+  <p class="hint">The table shows each server's <em>effective</em> values. <strong>(global)</strong> means it inherits the Global Defaults; <strong>(server)</strong> means this server overrides them.</p>
 </div>
 
 <div id="notif_alert" role="status" aria-live="polite" class="status-message" style="display:none;"></div>
@@ -857,7 +938,12 @@ def settings_html(servers: list[dict]) -> str:
     </select>
   </div>
 
-  <fieldset>
+  <div class="form-group">
+    <label><input id="n_inherit" name="inheritNotifyDefaults" type="checkbox" onchange="toggleInherit()"> Use global notification defaults for this server</label>
+    <div class="hint">When checked, this server follows the Global Defaults above and its per-server settings below are ignored. Uncheck to override anything for this server only.</div>
+  </div>
+
+  <fieldset id="n_override_fields">
     <legend>Event Triggers</legend>
     <div class="form-group">
       <label><input id="n_notifyloginout" type="checkbox" name="notifyloginout" value="1"> Notify when users log in or log out</label>
@@ -922,43 +1008,133 @@ def settings_html(servers: list[dict]) -> str:
     </div>
   </fieldset>
 
-  <button type="submit" class="primary">Save Settings</button>
+  <p class="hint">Values you save here override the global defaults for <strong>this</strong> server only.</p>
+  <button type="submit" class="primary">Save Settings for This Server</button>
 </form>
 
 <script>
 var allServers = {servers_json};
+var notifDefaults = {defaults_json};
+
+function loadGlobalDefaults() {{
+  var d = notifDefaults || {{}};
+  document.getElementById('g_notifyloginout').checked = d.notifyloginout !== false && d.notifyloginout !== '0';
+  document.getElementById('g_notifymessage').checked = d.notifymessage !== false && d.notifymessage !== '0';
+  document.getElementById('g_systemnotify').checked = !!(d.systemnotify && d.systemnotify !== '0');
+  document.getElementById('g_ntfy').checked = !!(d.ntfy && d.ntfy !== '0');
+  document.getElementById('g_ntfyUrl').value = d.ntfyUrl || 'https://ntfy.sh';
+  document.getElementById('g_ntfyTopic').value = d.ntfyTopic || '';
+  document.getElementById('g_ntfyUser').value = d.ntfyUser || '';
+  document.getElementById('g_ntfyPassword').value = d.ntfyPassword || '';
+  document.getElementById('g_prowl').checked = !!(d.prowl && d.prowl !== '0');
+  document.getElementById('g_prowlkey').value = d.prowlkey || '';
+  document.getElementById('g_mgnotify').checked = !!(d.mgnotify && d.mgnotify !== '0');
+  document.getElementById('g_mgnotifykey').value = d.mgnotifykey || '';
+  document.getElementById('g_pushover').checked = !!(d.pushover && d.pushover !== '0');
+  document.getElementById('g_pushoveruser').value = d.pushoveruser || '';
+  document.getElementById('g_pushovertoken').value = d.pushovertoken || '';
+}}
+
+function testSummary(d) {{
+  if (!d.test || !d.test.results || !d.test.results.length) return '';
+  var res = d.test.results.join('; ');
+  var scope = d.test.scope === 'global' ? 'globally' : ('on ' + d.test.scope);
+  return ' We sent a test push notification to prove this works ' + scope + ': ' + res + '.';
+}}
+
+async function saveDefaults(e) {{
+  e.preventDefault();
+  var payload = {{
+    notif_defaults: true,
+    notifyloginout: document.getElementById('g_notifyloginout').checked ? '1' : '0',
+    notifymessage: document.getElementById('g_notifymessage').checked ? '1' : '0',
+    systemnotify: document.getElementById('g_systemnotify').checked ? '1' : '0',
+    ntfy: document.getElementById('g_ntfy').checked ? '1' : '0',
+    ntfyUrl: document.getElementById('g_ntfyUrl').value.trim(),
+    ntfyTopic: document.getElementById('g_ntfyTopic').value.trim(),
+    ntfyUser: document.getElementById('g_ntfyUser').value.trim(),
+    ntfyPassword: document.getElementById('g_ntfyPassword').value,
+    prowl: document.getElementById('g_prowl').checked ? '1' : '0',
+    prowlkey: document.getElementById('g_prowlkey').value.trim(),
+    mgnotify: document.getElementById('g_mgnotify').checked ? '1' : '0',
+    mgnotifykey: document.getElementById('g_mgnotifykey').value.trim(),
+    pushover: document.getElementById('g_pushover').checked ? '1' : '0',
+    pushoveruser: document.getElementById('g_pushoveruser').value.trim(),
+    pushovertoken: document.getElementById('g_pushovertoken').value.trim()
+  }};
+  try {{
+    var res = await fetch('/settings', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload)
+    }});
+    var d = await res.json();
+    var alertDiv = document.getElementById('notif_alert');
+    alertDiv.style.display = 'block';
+    if (d.ok) {{
+      alertDiv.textContent = 'Global defaults saved and applied to all servers. PowerCom config refreshed (no reconnect).' + testSummary(d);
+      setTimeout(function() {{ window.location.reload(); }}, 1200);
+    }} else {{
+      alertDiv.textContent = 'Error saving global defaults';
+    }}
+  }} catch (err) {{
+    alert('Network error: ' + err);
+  }}
+}}
 
 function loadServerNotifs(sn) {{
   var s = allServers[sn] || {{}};
+  var d = notifDefaults || {{}};
+  var inherit = s.inheritNotifyDefaults !== false;
+  var base = inherit ? d : s;
+  var pick = function(k) {{ return base[k] !== undefined ? base[k] : d[k]; }};
   document.getElementById('n_shortname').value = sn;
-  document.getElementById('n_notifyloginout').checked = s.notifyloginout !== false && s.notifyloginout !== '0';
-  document.getElementById('n_notifymessage').checked = s.notifymessage !== false && s.notifymessage !== '0';
-  document.getElementById('n_systemnotify').checked = !!(s.systemnotify && s.systemnotify !== '0');
-  document.getElementById('n_ntfy').checked = !!(s.ntfy && s.ntfy !== '0');
-  document.getElementById('n_ntfyUrl').value = s.ntfyUrl || 'https://ntfy.sh';
-  document.getElementById('n_ntfyTopic').value = s.ntfyTopic || '';
-  document.getElementById('n_ntfyUser').value = s.ntfyUser || '';
-  document.getElementById('n_ntfyPassword').value = s.ntfyPassword || '';
-  document.getElementById('n_prowl').checked = !!(s.prowl && s.prowl !== '0');
-  document.getElementById('n_prowlkey').value = s.prowlkey || '';
-  document.getElementById('n_mgnotify').checked = !!(s.mgnotify && s.mgnotify !== '0');
-  document.getElementById('n_mgnotifykey').value = s.mgnotifykey || '';
-  document.getElementById('n_pushover').checked = !!(s.pushover && s.pushover !== '0');
-  document.getElementById('n_pushoveruser').value = s.pushoveruser || '';
-  document.getElementById('n_pushovertoken').value = s.pushovertoken || '';
+  document.getElementById('n_inherit').checked = inherit;
+  document.getElementById('n_notifyloginout').checked = pick('notifyloginout') !== false && pick('notifyloginout') !== '0';
+  document.getElementById('n_notifymessage').checked = pick('notifymessage') !== false && pick('notifymessage') !== '0';
+  document.getElementById('n_systemnotify').checked = !!(pick('systemnotify') && pick('systemnotify') !== '0');
+  document.getElementById('n_ntfy').checked = !!(pick('ntfy') && pick('ntfy') !== '0');
+  document.getElementById('n_ntfyUrl').value = pick('ntfyUrl') || 'https://ntfy.sh';
+  document.getElementById('n_ntfyTopic').value = pick('ntfyTopic') || '';
+  document.getElementById('n_ntfyUser').value = pick('ntfyUser') || '';
+  document.getElementById('n_ntfyPassword').value = pick('ntfyPassword') || '';
+  document.getElementById('n_prowl').checked = !!(pick('prowl') && pick('prowl') !== '0');
+  document.getElementById('n_prowlkey').value = pick('prowlkey') || '';
+  document.getElementById('n_mgnotify').checked = !!(pick('mgnotify') && pick('mgnotify') !== '0');
+  document.getElementById('n_mgnotifykey').value = pick('mgnotifykey') || '';
+  document.getElementById('n_pushover').checked = !!(pick('pushover') && pick('pushover') !== '0');
+  document.getElementById('n_pushoveruser').value = pick('pushoveruser') || '';
+  document.getElementById('n_pushovertoken').value = pick('pushovertoken') || '';
+  toggleInherit();
 
   var alertDiv = document.getElementById('notif_alert');
   alertDiv.style.display = 'block';
-  alertDiv.textContent = 'Loaded settings for ' + sn + '.';
+  alertDiv.textContent = inherit
+    ? ('Loaded ' + sn + ' (uses global defaults; per-server settings are disabled until you uncheck the box).')
+    : ('Loaded ' + sn + ' with its own per-server settings.');
+}}
+
+function toggleInherit() {{
+  var on = document.getElementById('n_inherit').checked;
+  var form = document.getElementById('notifForm');
+  var inputs = form.querySelectorAll('input, select, input, textarea');
+  for (var i = 0; i < inputs.length; i++) {{
+    var el = inputs[i];
+    if (el.id === 'n_shortname' || el.id === 'n_inherit') continue;
+    if (el.type === 'submit' || el.id === 'n_inherit') continue;
+    el.disabled = on;
+  }}
 }}
 
 var initialSn = document.getElementById('n_shortname').value;
 if (initialSn) loadServerNotifs(initialSn);
+loadGlobalDefaults();
 
 async function saveNotifs(e) {{
   e.preventDefault();
   var payload = {{
     shortname: document.getElementById('n_shortname').value,
+    inheritNotifyDefaults: document.getElementById('n_inherit').checked,
     notifyloginout: document.getElementById('n_notifyloginout').checked ? '1' : '0',
     notifymessage: document.getElementById('n_notifymessage').checked ? '1' : '0',
     systemnotify: document.getElementById('n_systemnotify').checked ? '1' : '0',
@@ -986,8 +1162,8 @@ async function saveNotifs(e) {{
     if (d.ok) {{
       var alertDiv = document.getElementById('notif_alert');
       alertDiv.style.display = 'block';
-      alertDiv.textContent = 'Settings saved successfully for ' + payload.shortname + '.';
-      setTimeout(function() {{ window.location.reload(); }}, 800);
+      alertDiv.textContent = 'Settings saved for ' + payload.shortname + ' and applied. PowerCom config refreshed (no reconnect).' + testSummary(d);
+      setTimeout(function() {{ window.location.reload(); }}, 1200);
     }} else {{
       alert('Error saving settings');
     }}

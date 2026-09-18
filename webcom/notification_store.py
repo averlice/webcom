@@ -264,6 +264,27 @@ def backfill_peers(uid_label: dict[str, str]) -> int:
         return 0
 
 
+def rename_server(old_sn: str, new_sn: str) -> int:
+    """Migrate stored history for a renamed server. Returns rows updated."""
+    old_sn = old_sn or ""
+    new_sn = new_sn or ""
+    if not old_sn or old_sn == new_sn:
+        return 0
+    try:
+        with _lock:
+            conn = _connect()
+            cur = conn.execute(
+                "UPDATE notifications SET server = ? WHERE server = ?",
+                (new_sn, old_sn),
+            )
+            conn.commit()
+            return cur.rowcount
+    except Exception as exc:
+        import logging
+        logging.getLogger("webcom").exception("notification rename failed: %s", exc)
+        return 0
+
+
 def _row_to_dict(row: dict) -> dict:
     out = dict(row)
     try:

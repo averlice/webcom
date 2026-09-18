@@ -97,7 +97,11 @@ class Config:
             case _: return configValue
 
     def reloadConf(self):
-        self.serverConfigs = conf.servers()
+        try:
+            self.serverConfigs = conf.servers()
+        except Exception as exc:
+            import sys
+            print(f"[config] reload skipped: {exc}", file=sys.stderr)
 
 class ConfigWatcher(FileSystemEventHandler):
     def __init__(self, configPath, reloadFunc):
@@ -105,4 +109,8 @@ class ConfigWatcher(FileSystemEventHandler):
         self.reloadFunc = reloadFunc
 
     def on_modified(self, event):
-        self.reloadFunc()
+        try:
+            self.reloadFunc()
+        except Exception as exc:
+            import sys
+            print(f"[config] watch reload error: {exc}", file=sys.stderr)

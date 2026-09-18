@@ -152,6 +152,19 @@ class TTComBridge:
         self.events = EventQueue()
         self.logs = LogBuffer()
         self._ready = False
+        # Reconnect watchdog state. WebCom builds TTComCmd with noAutoLogins,
+        # so PowerCom's built-in recycle-on-disconnect never fires; WebCom must
+        # watch the links itself. `_suppressed` marks servers the user explicitly
+        # disconnected (stay down until they hit Connect), `_wanted` marks
+        # servers manually connected this session (watchdog keeps them alive
+        # even if their config opts out), and `_last_attempt`/`_stuck_since`
+        # provide backoff + recovery from a login that never completes.
+        self._watchdog_started = False
+        self._watchdog_guard = threading.Lock()
+        self._suppressed: set[str] = set()
+        self._wanted: set[str] = set()
+        self._last_attempt: dict[str, float] = {}
+        self._stuck_since: dict[str, float] = {}
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -167,6 +180,8 @@ class TTComBridge:
             logging.getLogger("webcom").info("WebCom bridge started, log capture active")
             # Auto-connect to servers in background after startup
             self._start_auto_connect()
+            # Keep the links alive after network drops.
+            self._start_watchdog()
             return
 
     def _setup_log_capture(self) -> None:
@@ -218,6 +233,99 @@ class TTComBridge:
             import traceback
             log.exception("Auto-connect task failed")
             self.logs.add("ERROR", f"Auto-connect task failed: {e}\n{traceback.format_exc()}", "webcom")
+
+    def _start_watchdog(self) -> None:
+        """Start the daemon that reconnects servers after a network drop.
+
+        PowerCom's own recycle-on-disconnect only fires when a server's
+        autoLogin flag is set, and WebCom builds TTComCmd with noAutoLogins
+        (we manage connections ourselves). Without this, a dropped link stays
+        down until the container is restarted.
+        """
+        with self._watchdog_guard:
+            if self._watchdog_started:
+                return
+            self._watchdog_started = True
+        threading.Thread(target=self._watchdog_loop,
+                         name="webcom-reconnect-watchdog", daemon=True).start()
+
+    def _watchdog_loop(self) -> None:
+        import time
+        import logging
+        log = logging.getLogger("webcom")
+        while True:
+            time.sleep(20)
+            if not self._ready or self._cmd is None:
+                continue
+            try:
+                self._watchdog_pass()
+            except Exception as exc:
+                log.error("watchdog: %s", exc)
+                self.logs.add("ERROR", f"watchdog: {exc}", "webcom")
+
+    def _watchdog_pass(self) -> None:
+        import time
+        import logging
+        log = logging.getLogger("webcom")
+        from . import config_store
+        now = time.time()
+        for s in config_store.list_servers():
+            sn = str(s.get("shortname", "")).strip()
+            if not sn or sn in self._suppressed:
+                continue
+            auto = s.get("autoReconnect", s.get("connectOnStart", True))
+            if not auto and sn not in self._wanted:
+                continue
+            server_obj = self.get_server_obj(sn)
+            if server_obj is None:
+                continue
+            try:
+                manual = bool(getattr(server_obj, "manualCM", False))
+            except Exception:
+                manual = False
+            if manual:
+                continue
+            state = str(getattr(server_obj, "state", ""))
+            if state == "loggedIn":
+                self._stuck_since.pop(sn, None)
+                continue
+            if state == "loggingIn":
+                # A login that never completes leaves the server stuck in
+                # "loggingIn". Force a disconnect so the next pass reconnects
+                # cleanly instead of retrying a half-open session forever.
+                since = self._stuck_since.setdefault(sn, now)
+                if now - since < 45:
+                    continue
+                self._stuck_since.pop(sn, None)
+                self.logs.add("WARNING", f"watchdog: {sn} stuck logging in; forcing reset", "webcom")
+                try:
+                    with self._command_lock:
+                        self._cmd.onecmd(f"switch {sn}")
+                        self._cmd.onecmd("disconnect")
+                except Exception as exc:
+                    self.logs.add("ERROR", f"watchdog: reset {sn} failed: {exc}", "webcom")
+                continue
+            if now - self._last_attempt.get(sn, 0.0) < 25:
+                continue
+            self._last_attempt[sn] = now
+            self.logs.add("WARNING", f"watchdog: {sn} down (state={state}); reconnecting", "webcom")
+            self.events.publish({"type": "system", "text": f"Connection lost on {sn}; reconnecting..."})
+            try:
+                with self._command_lock:
+                    self._cmd.onecmd(f"switch {sn}")
+                    # do_login clears manualCM; login auto-joins the channel.
+                    self._cmd.onecmd("login")
+                sv = self.get_server_obj(sn)
+                st = str(getattr(sv, "state", "")) if sv else ""
+                if st == "loggedIn":
+                    self.logs.add("INFO", f"watchdog: {sn} reconnected", "webcom")
+                    self._stuck_since.pop(sn, None)
+                else:
+                    err = getattr(sv, "lastError", None) if sv else None
+                    self.logs.add("WARNING", f"watchdog: reconnect for {sn} incomplete (state={st}, err={err})", "webcom")
+            except Exception as exc:
+                log.exception("watchdog: reconnect %s failed", sn)
+                self.logs.add("ERROR", f"watchdog: reconnect for {sn} failed: {exc}", "webcom")
 
     def _build_cmd(self):
         """Import TTComCmd from the PowerCom dir and wrap its output hooks.
@@ -563,10 +671,28 @@ class TTComBridge:
         try:
             with self._command_lock:
                 self._cmd.onecmd("refresh")
+                self._reload_powercom_features_config()
                 self.connect_all()
         except Exception as exc:
             self.logs.add("ERROR", f"Server refresh failed: {exc}", "webcom")
             self.events.publish({"type": "system", "text": f"Server refresh failed: {exc}"})
+
+    @staticmethod
+    def _reload_powercom_features_config() -> None:
+        """Force PowerCom's live (features) config to re-read ttcom.conf.
+
+        PowerCom reloads its config via a file watcher; if that watcher thread
+        has ever died (a mid-write parse used to crash it) newly saved toggles
+        would not be applied to real event pushes until restart. Re-reading
+        here makes settings changes take effect immediately, watcher or not.
+        """
+        import logging
+        try:
+            from powercom_core.features import _getConfig
+            _getConfig().reloadConf()
+        except Exception as exc:
+            logging.getLogger("webcom").warning(
+                "powercom features reload skipped: %s", exc)
 
     def connect_all(self) -> None:
         """Ensure all configured servers are logged in and joined to their channels.
@@ -593,6 +719,9 @@ class TTComBridge:
           for s in servers:
             sn = s.get("shortname", "server")
             channel = s.get("channel")
+            if sn in self._suppressed:
+                self.logs.add("INFO", f"connect_all: skipping suppressed {sn}", "webcom")
+                continue
             log.info("connect_all: processing server %s (channel=%s)", sn, channel)
             self.logs.add("INFO", f"connect_all: processing server {sn} (channel={channel})", "webcom")
             try:
@@ -616,6 +745,7 @@ class TTComBridge:
                         self.events.publish({"type": "system", "text": f"Login to {sn} failed: {error}"})
                         continue
                     self.events.publish({"type": "system", "text": f"Logged in to {sn}"})
+                    self._send_connect_test(sn)
                 else:
                     self.events.publish({"type": "system", "text": f"Already logged in to {sn}"})
                 
@@ -636,7 +766,7 @@ class TTComBridge:
         """Returns connection and channel status for all configured servers."""
         from . import config_store
         result = []
-        cfg_servers = config_store.list_servers()
+        cfg_servers = config_store.visible_servers()
         for s in cfg_servers:
             sn = s.get("shortname", "")
             server_obj = self.get_server_obj(sn)
@@ -662,10 +792,47 @@ class TTComBridge:
             })
         return result
 
+    def _send_connect_test(self, shortname: str) -> None:
+        """Fire a proof push for every enabled service on a fresh connection.
+
+        Runs in its own thread so a slow/unreachable push provider never
+        blocks the command lock. Outcomes are written to the webcom log so
+        the owner can confirm the pipeline works after every login.
+        """
+        import threading
+        try:
+            from . import config_store
+            from .notify_test import send_test_push
+            settings = config_store.effective_notify_settings(
+                config_store.get_server(shortname) or {}
+            )
+            title = "WebCom connected"
+            message = (f"WebCom is now connected to {shortname}. "
+                       "This message proves your push notifications are working.")
+        except Exception as exc:
+            self.logs.add("WARNING", f"Connect test {shortname}: setup failed: {exc}", "webcom")
+            return
+
+        def _run() -> None:
+            try:
+                results = send_test_push(settings, title, message)
+            except Exception as exc:
+                self.logs.add("WARNING", f"Connect test {shortname} failed: {exc}", "webcom")
+                return
+            if results:
+                self.logs.add("INFO", f"Connect test {shortname}: {', '.join(results)}", "webcom")
+
+        threading.Thread(target=_run, name=f"webcom-connect-test-{shortname}",
+                         daemon=True).start()
+
     def connect_server(self, shortname: str) -> None:
         """Connect and log in to a specific server in background."""
         if not self._ready:
             self.start()
+        # Explicit manual connect: lift any suppression so the watchdog keeps
+        # this link alive even if the server's config opted out of watching.
+        self._suppressed.discard(shortname)
+        self._wanted.add(shortname)
         def _task():
             with self._command_lock:
                 try:
@@ -676,6 +843,7 @@ class TTComBridge:
                     st = getattr(server_obj, "state", "") if server_obj else ""
                     if st == "loggedIn":
                         self.events.publish({"type": "system", "text": f"Connected to {shortname}"})
+                        self._send_connect_test(shortname)
                     else:
                         err = getattr(server_obj, "lastError", None) or "Login failed"
                         self.events.publish({"type": "system", "text": f"Failed {shortname}: {err}"})
@@ -687,6 +855,9 @@ class TTComBridge:
         """Disconnect from a specific server."""
         if not self._ready:
             self.start()
+        # The watchdog must not fight an explicit manual disconnect.
+        self._suppressed.add(shortname)
+        self._wanted.discard(shortname)
         def _task():
             with self._command_lock:
                 try:
@@ -803,10 +974,11 @@ class TTComBridge:
             except Exception as exc:
                 self.logs.add("WARNING", f"roster: cannot switch to {shortname}: {exc}", "webcom")
                 return {"server": shortname, "users": [], "me": None}
-            users = sorted(
-                (self._user_record(server, u) for u in server.users.values()),
-                key=lambda r: (r["label"] or "").lower(),
-            )
+            users = [
+                rec for u in server.users.values()
+                for rec in [self._user_record(server, u)]
+            ]
+            users.sort(key=lambda r: (r["label"] or "").lower())
             me = None
             try:
                 me = self._user_record(server, server.me)
