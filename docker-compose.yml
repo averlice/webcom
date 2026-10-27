@@ -10,10 +10,24 @@
 # The /data volume is the ONLY place secrets + generated config live. It is
 # mounted from ./data on the host, which is gitignored.
 services:
+  # One-shot: Docker creates the ./data bind mount as root, but WebCom runs
+  # as the non-root webcom user. Fix ownership before the app starts.
+  init-data:
+    image: averlice/webcom:latest
+    user: root
+    entrypoint: ["/bin/sh", "-c", "chown -R webcom:webcom /data 2>/dev/null || echo 'warning: could not chown /data (continuing)' >&2"]
+    volumes:
+      - ./data:/data
+    network_mode: none
+    restart: "no"
+
   webcom:
     build: .
     image: averlice/webcom:latest
     restart: unless-stopped
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
     ports:
       - "0.0.0.0:2032:2032"
     volumes:

@@ -16,14 +16,8 @@ jobs:
       - name: Build Docker image
         run: docker compose build --no-cache
 
-      - name: Prepare data directory
-        run: |
-          mkdir -p data
-          docker run --rm --user root -v "$PWD/data:/data" \
-            --entrypoint chown averlice/webcom:latest -R webcom:webcom /data
-
       - name: Start container
-        run: docker compose up -d
+        run: docker compose up -d || { docker compose logs; exit 1; }
 
       - name: Wait for web service
         run: |
@@ -35,12 +29,15 @@ jobs:
             sleep 2
           done
           echo "Web service failed to start"
+          docker compose logs init-data
           docker compose logs webcom
           exit 1
 
       - name: Test health endpoints
         run: |
           curl -sf http://localhost:2032/api/debug/bridge | jq .
+          init_id=$(docker compose ps -aq init-data)
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$init_id")" = "0"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:2032/api/logs)" = "401"
           curl -sf http://localhost:2032/setup | grep -qi "WebCom"
           if docker compose logs webcom | grep -q "Traceback"; then

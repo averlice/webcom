@@ -35,13 +35,14 @@ KINDS = (
 
 _lock = threading.Lock()
 _local = threading.local()
+_schema_ready = False
+_unavailable_warned = False
 
 
 def _connect() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is not None:
         return conn
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Rollback journal (DELETE) instead of WAL: the store's writes are already
     # serialized by the module lock, and unlike WAL it leaves no persistent
     # -wal/-shm sidecar files. Those sidecar locks break on Docker Desktop host
@@ -51,23 +52,27 @@ def _connect() -> sqlite3.Connection:
     last_err: Exception | None = None
     for _ in range(3):
         try:
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=DELETE")
             conn.execute("PRAGMA busy_timeout=5000")
             _local.conn = conn
             return conn
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
             last_err = exc
             time.sleep(0.25)
-    if last_err is not None:
-        raise last_err
-    raise sqlite3.OperationalError(f"unable to open database file: {DB_PATH}")
+    raise sqlite3.OperationalError(
+        f"notification store unavailable at {DB_PATH}: {last_err}"
+    ) from last_err
 
 
 def init() -> None:
     """Create tables/indexes if missing. Safe to call repeatedly."""
+    global _schema_ready
     with _lock:
+        if _schema_ready:
+            return
         conn = _connect()
         conn.executescript(
             """
@@ -89,6 +94,33 @@ def init() -> None:
             """
         )
         conn.commit()
+        _schema_ready = True
+
+
+def _ensure_ready() -> bool:
+    """Make sure the schema exists; return False if the DB is unreachable.
+
+    A missing or unwritable /data must not take the web app down: callers
+    degrade to empty results, and the next call retries, so the store recovers
+    as soon as the volume becomes writable.
+    """
+    global _unavailable_warned
+    if _schema_ready:
+        return True
+    try:
+        init()
+        return True
+    except Exception as exc:
+        if not _unavailable_warned:
+            _unavailable_warned = True
+            import logging
+            logging.getLogger("webcom").error(
+                "Notification history unavailable at %s (%s). "
+                "Check that /data is writable by the webcom user; "
+                "the compose init-data service fixes ownership.",
+                DB_PATH, exc,
+            )
+        return False
 
 
 def insert(server: str, kind: str, text: str,
@@ -108,6 +140,8 @@ def insert(server: str, kind: str, text: str,
         "seen": 0,
     }
     try:
+        if not _ensure_ready():
+            return None
         with _lock:
             conn = _connect()
             cur = conn.execute(
@@ -119,7 +153,7 @@ def insert(server: str, kind: str, text: str,
             row["id"] = cur.lastrowid
     except Exception as exc:
         import logging
-        logging.getLogger("webcom").exception("notification insert failed: %s", exc)
+        logging.getLogger("webcom").warning("notification insert failed: %s", exc)
         return None
     return _row_to_dict(row)
 
@@ -148,13 +182,15 @@ def query(server: str | None = None, kind: str | None = None,
     sql += " ORDER BY received_at DESC, id DESC LIMIT ?"
     params.append(int(limit))
     try:
+        if not _ensure_ready():
+            return []
         with _lock:
             conn = _connect()
             rows = conn.execute(sql, params).fetchall()
             return [_row_to_dict(dict(r)) for r in rows]
     except Exception as exc:
         import logging
-        logging.getLogger("webcom").exception("notification query failed: %s", exc)
+        logging.getLogger("webcom").warning("notification query failed: %s", exc)
         return []
 
 
@@ -165,6 +201,8 @@ def unread_count(server: str | None = None) -> int:
         sql += " AND server = ?"
         params.append(server)
     try:
+        if not _ensure_ready():
+            return 0
         with _lock:
             conn = _connect()
             return int(conn.execute(sql, params).fetchone()["c"])
@@ -184,6 +222,8 @@ def mark_seen(ids: list[int] | None = None, server: str | None = None) -> int:
         sql += " AND server = ?"
         params.append(server)
     try:
+        if not _ensure_ready():
+            return 0
         with _lock:
             conn = _connect()
             cur = conn.execute(sql, params)
@@ -191,7 +231,7 @@ def mark_seen(ids: list[int] | None = None, server: str | None = None) -> int:
             return cur.rowcount
     except Exception as exc:
         import logging
-        logging.getLogger("webcom").exception("mark_seen failed: %s", exc)
+        logging.getLogger("webcom").warning("mark_seen failed: %s", exc)
         return 0
 
 
@@ -210,6 +250,8 @@ def clear(server: str | None = None, kind: str | None = None,
         sql += " AND direction = ?"
         params.append(direction)
     try:
+        if not _ensure_ready():
+            return 0
         with _lock:
             conn = _connect()
             cur = conn.execute(sql, params)
@@ -217,7 +259,7 @@ def clear(server: str | None = None, kind: str | None = None,
             return cur.rowcount
     except Exception as exc:
         import logging
-        logging.getLogger("webcom").exception("notification clear failed: %s", exc)
+        logging.getLogger("webcom").warning("notification clear failed: %s", exc)
         return 0
 
 
@@ -238,6 +280,8 @@ def backfill_peers(uid_label: dict[str, str]) -> int:
         "OR peer LIKE '%(userid %'"
     )
     try:
+        if not _ensure_ready():
+            return 0
         with _lock:
             conn = _connect()
             rows = conn.execute(
@@ -260,7 +304,7 @@ def backfill_peers(uid_label: dict[str, str]) -> int:
             return len(updates)
     except Exception as exc:
         import logging
-        logging.getLogger("webcom").exception("notification backfill failed: %s", exc)
+        logging.getLogger("webcom").warning("notification backfill failed: %s", exc)
         return 0
 
 
@@ -271,6 +315,8 @@ def rename_server(old_sn: str, new_sn: str) -> int:
     if not old_sn or old_sn == new_sn:
         return 0
     try:
+        if not _ensure_ready():
+            return 0
         with _lock:
             conn = _connect()
             cur = conn.execute(
@@ -281,7 +327,7 @@ def rename_server(old_sn: str, new_sn: str) -> int:
             return cur.rowcount
     except Exception as exc:
         import logging
-        logging.getLogger("webcom").exception("notification rename failed: %s", exc)
+        logging.getLogger("webcom").warning("notification rename failed: %s", exc)
         return 0
 
 
@@ -299,7 +345,3 @@ def _row_to_dict(row: dict) -> dict:
 def _fmt_time(ts: float) -> str:
     import datetime
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-
-
-# Ensure tables exist on import so the bridge can write immediately.
-init()

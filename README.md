@@ -28,15 +28,28 @@ WebCom is a headless TeamTalk text client delivered as an accessible web dashboa
 
 ### Deployment
 
+#### Stable release (prebuilt image)
+
+Use this if you don't want your system to build the image from scratch:
+
 ```bash
-# Clone the repository
+mkdir -p webcom && cd webcom
+curl -fsSLO https://blindsoft.net/docker-compose.yml
+docker compose up -d
+docker compose logs -f webcom
+```
+
+This pulls `averlice/webcom:latest` (amd64, arm64, arm/v7) from Docker Hub.
+
+#### From source
+
+Cloning the repository and running Compose builds the image locally:
+
+```bash
 git clone https://github.com/averlice/webcom.git
 cd webcom
-
-# Start the container
+docker compose build
 docker compose up -d
-
-# View logs
 docker compose logs -f webcom
 ```
 
@@ -141,6 +154,8 @@ file get/delete                # File management
 
 ### Building Locally
 
+This is the source-build path. For the prebuilt release, see Quick Start → Stable release.
+
 ```bash
 docker compose build --no-cache
 docker compose up -d
@@ -190,7 +205,15 @@ Check for:
 
 - Port 2032 already in use
 - `./data` directory permissions
-- Missing config files
+
+WebCom runs as the non-root `webcom` user. Docker creates a missing `./data`
+bind mount as root, so the container cannot write its database and exits with
+`sqlite3.OperationalError: unable to open database file`. The bundled
+`init-data` service fixes ownership on every `docker compose up`; if you run
+the container without Compose, `chown -R webcom:webcom ./data` first.
+
+On Docker Desktop for Windows, the `init-data` chown may print a warning; the
+bind mount is already writable, so this is harmless.
 
 ## License
 

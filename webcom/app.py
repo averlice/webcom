@@ -657,6 +657,13 @@ def _apply_session_secret():
 
 def main():
     _apply_session_secret()
+    try:
+        notification_store.init()
+    except Exception as exc:
+        import logging
+        logging.getLogger("webcom").error(
+            "Notification history disabled: %s", exc
+        )
     if config_store.is_configured():
         bridge.start()
     port = config_store.DEFAULT_PORT
