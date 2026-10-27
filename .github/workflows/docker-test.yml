@@ -16,30 +16,62 @@ jobs:
       - name: Build Docker image
         run: docker compose build --no-cache
 
+      - name: Prepare data directory
+        run: |
+          mkdir -p data
+          docker run --rm --user root -v "$PWD/data:/data" \
+            --entrypoint chown averlice/webcom:latest -R webcom:webcom /data
+
       - name: Start container
         run: docker compose up -d
 
-      - name: Wait for service
+      - name: Wait for web service
         run: |
           for i in {1..30}; do
-            if curl -sf http://localhost:2032/api/debug/bridge | grep -q '"ready": true'; then
-              echo "Service ready"
+            if curl -sf http://localhost:2032/api/debug/bridge | jq -e '.status == "ok"' >/dev/null; then
+              echo "Web service up"
               exit 0
             fi
             sleep 2
           done
-          echo "Service failed to start"
+          echo "Web service failed to start"
           docker compose logs webcom
           exit 1
 
       - name: Test health endpoints
         run: |
-          # Test debug endpoint
           curl -sf http://localhost:2032/api/debug/bridge | jq .
-          # Test logs endpoint
-          curl -sf http://localhost:2032/api/logs | jq .
-          # Test setup page (should redirect to login)
-          curl -sf http://localhost:2032/setup | grep -q "WebCom"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:2032/api/logs)" = "401"
+          curl -sf http://localhost:2032/setup | grep -qi "WebCom"
+          if docker compose logs webcom | grep -q "Traceback"; then
+            docker compose logs webcom
+            exit 1
+          fi
+
+      - name: Boot the engine with a dummy server
+        run: |
+          curl -sf -X POST http://localhost:2032/setup \
+            --data-urlencode 'web_user=ci' \
+            --data-urlencode 'web_pass=ci' \
+            --data-urlencode 'servers_json=[{"shortname":"ci","host":"127.0.0.1","tcpport":1,"udpport":1,"nickname":"ci","connectOnStart":false}]'
+          for i in {1..30}; do
+            body=$(curl -sf http://localhost:2032/api/debug/bridge || true)
+            if echo "$body" | jq -e '.ready == true and .cmd_exists == true' >/dev/null 2>&1; then
+              echo "Engine ready: $body"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Engine failed to boot"
+          docker compose logs webcom
+          exit 1
+
+      - name: Assert clean engine startup
+        run: |
+          if docker compose logs webcom | grep -q "Traceback"; then
+            docker compose logs webcom
+            exit 1
+          fi
 
       - name: Test Python syntax
         run: |

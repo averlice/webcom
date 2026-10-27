@@ -6,7 +6,7 @@ argon2-cffi>=23.1
 ntfpy>=0.0.12
 pyprowl>=3.0.1
 notify-py>=0.3.43
-prismatoid>=0.16.3
+prismatoid>=0.16.3; platform_machine != "armv7l"
 watchdog>=6.0.0
 # NOTE: wxpython, sound_lib, pywin32 are intentionally EXCLUDED - they are
 # desktop/audio deps for the PowerCom GUI, not needed by WebCom's headless bridge.

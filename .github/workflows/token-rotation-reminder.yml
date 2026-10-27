@@ -1,0 +1,51 @@
+name: Docker Hub token rotation reminder
+
+on:
+  schedule:
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open rotation issue if none is open
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: repo } = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            if (!repo.has_issues) {
+              core.warning('Issues are disabled; skipping rotation reminder.');
+              return;
+            }
+            const title = 'Rotate Docker Hub access token';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            if (issues.some((issue) => issue.title === title)) {
+              core.info('Rotation reminder is already open.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body: [
+                'The Docker Hub access token used by `docker-publish.yml` is due for rotation (~30 days).',
+                '',
+                '1. Docker Hub -> Account settings -> Security -> New Access Token (Read & Write, 30 days).',
+                `2. \`gh secret set DOCKERHUB_TOKEN --repo ${context.repo.owner}/${context.repo.repo}\``,
+                '3. Revoke the old token.',
+                '',
+                'Close this issue once the new token is in place.',
+              ].join('\n'),
+            });
