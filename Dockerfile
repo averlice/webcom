@@ -17,7 +17,7 @@ RUN groupadd -r webcom && useradd -r -g webcom -m -d /home/webcom webcom
 # irrelevant to a headless Linux container). Keep what TTComCmd + notifiers need.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        gcc pkg-config libffi-dev sox libsox-fmt-all \
+        gcc pkg-config libc6-dev libffi-dev sox libsox-fmt-all \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
