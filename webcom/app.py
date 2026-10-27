@@ -110,20 +110,20 @@ def setup():
             return "Username required", 400
         if not pw:
             return "Password required", 400
-        config_store.setup_web_admin(user, pw)
         try:
-            servers = json.loads(request.form.get("servers_json", "[]"))
+            raw_servers = json.loads(request.form.get("servers_json", "[]"))
         except json.JSONDecodeError:
             return "Invalid servers JSON", 400
-        if not isinstance(servers, list) or not servers:
+        if not isinstance(raw_servers, list) or not raw_servers:
             return "At least one server required", 400
-        for s in servers:
-            if not isinstance(s, dict):
-                continue
+        servers = []
+        for s in raw_servers:
             try:
-                s = _validated_server(s)
-            except ValueError as exc:
+                servers.append(_validated_server(s))
+            except (TypeError, ValueError) as exc:
                 return str(exc), 400
+        config_store.setup_web_admin(user, pw)
+        for s in servers:
             config_store.add_server(s)
         config_store.generate_ttcom_conf()
         try:

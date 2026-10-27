@@ -48,6 +48,14 @@ jobs:
             exit 1
           fi
 
+      - name: Reject invalid setup without locking the wizard
+        run: |
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:2032/setup \
+            --data-urlencode 'web_user=ci' \
+            --data-urlencode 'web_pass=ci' \
+            --data-urlencode 'servers_json=not-json')" = "400"
+          curl -sf http://localhost:2032/setup | grep -qi "WebCom"
+
       - name: Boot the engine with a dummy server
         run: |
           curl -sf -X POST http://localhost:2032/setup \
